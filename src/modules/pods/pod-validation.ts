@@ -70,7 +70,7 @@ export function validatePodAnswers(fields: PodField[], answers: Record<string, u
           f.type === 'qtyLines'
             ? (l: unknown) => !!l && typeof l === 'object' && typeof (l as { delivered?: unknown }).delivered === 'number' && (l as { delivered: number }).delivered >= 0
             : (l: unknown) => !!l && typeof l === 'object' && typeof (l as { type?: unknown }).type === 'string' && Number.isInteger((l as { qty?: unknown }).qty) && (l as { qty: number }).qty >= 0;
-        if (v === undefined || (Array.isArray(v) && v.length === 0)) {
+        if (missing(v) || (Array.isArray(v) && v.length === 0)) {
           if (enforce && f.required) issues.push(issue('FIELD_REQUIRED', f.key, `${f.label} is required`));
         } else if (!Array.isArray(v) || !v.every(lineOk)) issues.push(issue('INVALID_TYPE', f.key, `${f.label} has invalid lines`));
         break;

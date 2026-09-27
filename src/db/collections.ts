@@ -21,4 +21,5 @@ export const C = {
   deliveryOrders: 'deliveryOrders',
   shipments: 'shipments',
   events: 'events',
+  pods: 'pods',
 } as const;

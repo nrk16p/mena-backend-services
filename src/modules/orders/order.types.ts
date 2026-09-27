@@ -32,6 +32,8 @@ export interface DeliveryOrderDoc {
   pickupStopId: ObjectId | null;
   dropStopId: ObjectId | null;
   status: DoStatus;
+  /** Failed delivery attempts (spec §3.3), pushed by a FAILED POD. */
+  attempts?: { shipmentId: ObjectId; reasonCode: string; podId: ObjectId; at: Date }[];
   note: string | null;
   cancelledAt: Date | null;
   cancelReason: string | null;

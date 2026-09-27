@@ -55,6 +55,7 @@ export const DoItem = z.object({
   pickupStopId: z.string().nullable(),
   dropStopId: z.string().nullable(),
   status: z.enum(DO_STATUSES),
+  attempts: z.array(z.object({ shipmentId: z.string(), reasonCode: z.string(), podId: z.string(), at: z.string() })).default([]),
   note: z.string().nullable(),
   cancelledAt: z.string().nullable(),
   cancelReason: z.string().nullable(),

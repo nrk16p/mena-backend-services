@@ -38,4 +38,13 @@ describe('validatePodAnswers', () => {
     expect(validatePodAnswers(fields, {}, [], 'FAILED')).toEqual([]);
     expect(codes(validatePodAnswers(fields, { tempC: 'cold' }, [], 'FAILED'))).toEqual(['INVALID_TYPE']);
   });
+
+  it('treats an explicit null for line fields as missing', () => {
+    const lines: PodField[] = [
+      { key: 'qty', label: 'จำนวน', type: 'qtyLines', required: true },
+      { key: 'pallets', label: 'พาเลท', type: 'palletLines', required: false },
+    ];
+    expect(codes(validatePodAnswers(lines, { qty: null, pallets: null }, [], 'DELIVERED'))).toEqual(['FIELD_REQUIRED']);
+    expect(validatePodAnswers(lines, { qty: null, pallets: null }, [], 'FAILED')).toEqual([]);
+  });
 });
