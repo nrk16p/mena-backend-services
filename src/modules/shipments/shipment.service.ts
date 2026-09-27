@@ -9,6 +9,7 @@ import { toApi } from '../../lib/serialize.js';
 import { withTransaction } from '../../lib/tx.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import { jobGroupWarnings, rematchJobGroup } from '../orders/orders.service.js';
+import { findShipmentsUsing } from './shipment.queries.js';
 import type { ShipmentInputT } from './shipment.schemas.js';
 import type { LegDoc, ShipmentDoc, StopDoc } from './shipment.types.js';
 import { type DraftStop, type VehicleLite, toDraft, validateShipment } from './shipment.validation.js';
@@ -77,6 +78,40 @@ export async function linkDos(db: Db, shipment: ShipmentDoc, previousDoIds: Obje
   }
 }
 
+const uniqueOids = (ids: (ObjectId | null | undefined)[]): ObjectId[] => {
+  const m = new Map<string, ObjectId>();
+  for (const id of ids) if (id) m.set(id.toHexString(), id);
+  return [...m.values()];
+};
+
+/**
+ * Serializes vehicle/driver booking so two concurrent `createShipment` transactions for an
+ * overlapping window on the same vehicle or driver can't both commit. Plain reads before the
+ * transaction (validateShipment) see a stale snapshot under snapshot isolation, so this writes
+ * a no-op `$inc` to each resource's document first: MongoDB then conflicts the two transactions
+ * on that document, aborting and retrying the loser (see withTransaction), which re-checks
+ * overlap against the now-committed winner and throws `RESOURCE_TAKEN` instead of committing.
+ */
+export async function reserveResources(db: Db, shipment: ShipmentDoc, session: ClientSession): Promise<void> {
+  const vehicleIds = uniqueOids([shipment.head?.vehicleId, shipment.tail?.vehicleId]);
+  const driverIds = uniqueOids([shipment.head?.driverId, shipment.tail?.driverId]);
+  for (const id of vehicleIds) await db.collection(C.vehicles).updateOne({ _id: id }, { $inc: { bookingLock: 1 } }, { session });
+  for (const id of driverIds) await db.collection(C.drivers).updateOne({ _id: id }, { $inc: { bookingLock: 1 } }, { session });
+
+  const conflictOn = async (resourceType: 'vehicle' | 'driver', id: ObjectId) => {
+    const using = await findShipmentsUsing(db, resourceType, id, shipment.plannedStart, shipment.plannedEnd, shipment._id, session);
+    if (using.length > 0) {
+      throw conflict('RESOURCE_TAKEN', 'The vehicle or driver was booked by another shipment; reload and try again', {
+        resourceType,
+        resourceId: id.toHexString(),
+        shipmentNos: using.map((s) => s.shipmentNo),
+      });
+    }
+  };
+  for (const id of vehicleIds) await conflictOn('vehicle', id);
+  for (const id of driverIds) await conflictOn('driver', id);
+}
+
 export async function releaseDos(db: Db, shipmentId: ObjectId, session: ClientSession): Promise<void> {
   await db.collection<DeliveryOrderDoc>(C.deliveryOrders).updateMany(
     { shipmentId },
@@ -135,9 +170,13 @@ export async function createShipment(app: FastifyInstance, input: ShipmentInputT
   const warnings = await withTransaction(app.mongo, async (session) => {
     const coll = app.db.collection<ShipmentDoc>(C.shipments);
     await coll.insertOne(doc, { session });
+    await reserveResources(app.db, doc, session);
     await linkDos(app.db, doc, [], session);
     const fresh = [...withoutJobGroupWarnings(result.warnings), ...(await refreshJobGroups(app.db, doc, result.headVehicle, session))];
     await coll.updateOne({ _id: doc._id }, { $set: { warnings: fresh } }, { session });
+    // Safe to mutate the outer `doc` here even though withTransaction may retry this callback:
+    // each attempt recomputes `fresh` from scratch and reassigns it, so a retried attempt
+    // simply overwrites this with its own freshly-computed value before the transaction commits.
     doc.warnings = fresh;
     await writeAudit(app.db, { entity: 'shipment', entityId: doc._id.toHexString(), action: 'create', by, after: toApi(doc) }, { session });
     return fresh;

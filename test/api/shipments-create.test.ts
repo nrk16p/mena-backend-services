@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
@@ -61,6 +62,34 @@ describe('create and read shipments', () => {
     expect(statuses[0]).toBe(201);
     expect([409, 422]).toContain(statuses[1]);
     expect(await app.db.collection(C.shipments).countDocuments({ 'stops.pickupDoIds': (await app.db.collection(C.deliveryOrders).findOne({ doNo: d.doNo }))!._id })).toBe(1);
+  });
+
+  it('serializes vehicle/driver booking so only one of two same-vehicle shipments commits', async () => {
+    const d1 = await createDo(app, f);
+    const d2 = await createDo(app, f);
+    const [a, b] = await Promise.all([
+      postShipment(app, f, { plannedStart: day(14, 6), plannedEnd: day(14, 18), head: { vehicleId: f.ids.m1, driverId: f.ids.d2 }, doIds: [d1.id] }),
+      postShipment(app, f, { plannedStart: day(14, 6), plannedEnd: day(14, 18), head: { vehicleId: f.ids.m1, driverId: f.ids.d3 }, doIds: [d2.id] }),
+    ]);
+    const statuses = [a.statusCode, b.statusCode].sort();
+    expect(statuses[0]).toBe(201);
+    expect([409, 422]).toContain(statuses[1]);
+    const loser = a.statusCode === 201 ? b : a;
+    if (loser.statusCode === 409) {
+      expect(loser.json().code).toBe('RESOURCE_TAKEN');
+    } else {
+      expect(loser.json().code).toBe('SHIPMENT_INVALID');
+      expect(loser.json().details.errors.map((e: { code: string }) => e.code)).toContain('VEHICLE_DOUBLE_BOOKED');
+    }
+    const count = await app.db.collection(C.shipments).countDocuments({
+      'head.vehicleId': new ObjectId(f.ids.m1),
+      plannedStart: { $lt: new Date(day(14, 18)) },
+      plannedEnd: { $gt: new Date(day(14, 6)) },
+    });
+    expect(count).toBe(1);
+    // reserveResources' bookingLock is an internal write-conflict handle, not API surface.
+    const vehicle = await app.inject({ method: 'GET', url: `/api/v1/vehicles/${f.ids.m1}`, headers: f.viewer });
+    expect(vehicle.json()).not.toHaveProperty('bookingLock');
   });
 
   it('re-matches job groups with the assigned truck type', async () => {
