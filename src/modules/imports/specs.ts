@@ -1,5 +1,5 @@
 import { C } from '../../db/collections.js';
-import { driversDef, normalizePlate, vehiclesDef } from '../master/fleet.js';
+import { driversDef, plateKey, vehiclesDef } from '../master/fleet.js';
 import { locationsDef } from '../master/locations.js';
 import type { ResourceDef } from '../master/resource.js';
 import { clientsDef, materialsDef, serviceTypesDef, truckTypesDef, zonesDef } from '../master/simple.js';
@@ -15,6 +15,10 @@ type Get = (column: string) => string | undefined;
 export interface ImportSpec {
   def: ResourceDef;
   key: 'code' | 'plate';
+  // The DB field an existing document is looked up by. Usually the same as `key`, but
+  // vehicles are matched on the stricter `plateKey` (see fleet.ts) rather than the
+  // display-form `plate`.
+  dbKey: string;
   keyOf(get: Get): string | undefined;
   toBody(get: Get, ctx: ImportCtx): Promise<Record<string, unknown>>;
 }
@@ -42,6 +46,7 @@ const byCode = (get: Get) => get('code');
 const simple = (def: ResourceDef, extra: string[] = []): ImportSpec => ({
   def,
   key: 'code',
+  dbKey: 'code',
   keyOf: byCode,
   toBody: async (get) => Object.fromEntries(['code', 'name', ...extra].map((c) => [c, get(c)])),
 });
@@ -55,6 +60,7 @@ export const IMPORT_SPECS: Record<ImportEntity, ImportSpec> = {
   locations: {
     def: locationsDef,
     key: 'code',
+    dbKey: 'code',
     keyOf: byCode,
     toBody: async (get, ctx) => {
       const zoneCode = get('zoneCode');
@@ -75,9 +81,10 @@ export const IMPORT_SPECS: Record<ImportEntity, ImportSpec> = {
   vehicles: {
     def: vehiclesDef,
     key: 'plate',
+    dbKey: 'plateKey',
     keyOf: (get) => {
       const p = get('plate');
-      return p === undefined ? undefined : normalizePlate(p);
+      return p === undefined ? undefined : plateKey(p);
     },
     toBody: async (get, ctx) => {
       const tt = get('truckTypeCode');

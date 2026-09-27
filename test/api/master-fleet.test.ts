@@ -54,6 +54,16 @@ describe('locations, vehicles, drivers', () => {
     expect((await post('/vehicles', { plate: 'AB  1234', part: 'tail', truckTypeId: tractorType })).statusCode).toBe(409);
   });
 
+  it('treats space/dash/dot plate variants as the same plateKey, even when displayed differently', async () => {
+    const a = await post('/vehicles', { plate: '1กข1234', part: 'head', truckTypeId: tractorType });
+    expect(a.statusCode).toBe(201);
+    const b = await post('/vehicles', { plate: '1กข 1234', part: 'head', truckTypeId: tractorType });
+    expect(b.statusCode).toBe(409);
+    const c = await post('/vehicles', { plate: '1กข-1234', part: 'head', truckTypeId: tractorType });
+    expect(c.statusCode).toBe(409);
+    expect(JSON.stringify(a.json())).not.toContain('plateKey');
+  });
+
   it('enforces part vs truck-type category, including on PATCH', async () => {
     expect((await post('/vehicles', { plate: 'MX-1', part: 'rigid', truckTypeId: tractorType })).json().code).toBe('PART_CATEGORY_MISMATCH');
     expect((await post('/vehicles', { plate: 'MX-2', part: 'head', truckTypeId: rigidType })).json().code).toBe('PART_CATEGORY_MISMATCH');

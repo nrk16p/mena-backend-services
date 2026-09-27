@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
@@ -70,6 +71,78 @@ describe('imports', () => {
     const dup = await upload('vehicles', 'plate,part,truckTypeCode\n71-1,head,TRAILER\n72-2,head,TRAILER\n 71-1 ,head,TRAILER\n', true);
     expect(dup.json().rows[1].errors).toEqual([]);
     expect(dup.json().rows[2].errors[0]).toMatch(/duplicate/i);
+  });
+
+  it('update path only changes columns present and non-blank in the row: vehicles keep gpsId/gpsVendor', async () => {
+    await upload('truck-types', 'code,name,category\nTTGPS,Trailer GPS,tractor\n', false);
+    const first = await upload('vehicles', 'plate,part,truckTypeCode,gpsVendor,gpsId\nGPS-1,head,TTGPS,hino,GPS001\n', false);
+    expect(first.json()).toMatchObject({ created: 1, updated: 0, errors: 0 });
+    const second = await upload('vehicles', 'plate\nGPS-1\n', false);
+    expect(second.json()).toMatchObject({ created: 0, updated: 1, errors: 0 });
+    const doc = await app.db.collection(C.vehicles).findOne({ plate: 'GPS-1' });
+    expect(doc?.gpsVendor).toBe('hino');
+    expect(doc?.gpsId).toBe('GPS001');
+    expect(doc?.part).toBe('head');
+  });
+
+  it('update path only changes columns present and non-blank in the row: locations keep isSite/address/geofenceRadiusM', async () => {
+    await upload('zones', 'code,name\nZKEEP,Zone Keep\n', false);
+    const first = await upload(
+      'locations',
+      'code,name,zoneCode,isSite,address,lat,lng,geofenceRadiusM\nLOC-KEEP,Loc Keep,ZKEEP,yes,123 Main St,13.7,100.5,500\n',
+      false,
+    );
+    expect(first.json()).toMatchObject({ created: 1, updated: 0, errors: 0 });
+    const second = await upload('locations', 'code,name,zoneCode\nLOC-KEEP,Loc Keep Renamed,ZKEEP\n', false);
+    expect(second.json()).toMatchObject({ created: 0, updated: 1, errors: 0 });
+    const doc = await app.db.collection(C.locations).findOne({ code: 'LOC-KEEP' });
+    expect(doc?.isSite).toBe(true);
+    expect(doc?.address).toBe('123 Main St');
+    expect(doc?.geofenceRadiusM).toBe(500);
+    expect(doc?.name).toBe('Loc Keep Renamed');
+  });
+
+  it('a blank cell for an optional column on update keeps the old value', async () => {
+    await upload('zones', 'code,name\nZBLANK,Zone Blank\n', false);
+    const first = await upload(
+      'locations',
+      'code,name,zoneCode,address,lat,lng\nLOC-BLANK,Loc Blank,ZBLANK,Original Address,13.7,100.5\n',
+      false,
+    );
+    expect(first.json()).toMatchObject({ created: 1, errors: 0 });
+    const second = await upload('locations', 'code,name,zoneCode,address\nLOC-BLANK,Loc Blank,ZBLANK,\n', false);
+    expect(second.json()).toMatchObject({ created: 0, updated: 1, errors: 0 });
+    const doc = await app.db.collection(C.locations).findOne({ code: 'LOC-BLANK' });
+    expect(doc?.address).toBe('Original Address');
+  });
+
+  it('a lone lat (blank lng) on update still 422s with LAT_LNG_PAIR', async () => {
+    await upload('zones', 'code,name\nZLL,Zone LL\n', false);
+    await upload('locations', 'code,name,zoneCode,lat,lng\nLOC-LL,Loc LL,ZLL,13.7,100.5\n', false);
+    const bad = await upload('locations', 'code,name,zoneCode,lat,lng\nLOC-LL,Loc LL,ZLL,13.8,\n', false);
+    expect(bad.statusCode).toBe(422);
+    expect(bad.json().details.rows[0].errors[0]).toMatch(/lat and lng must be provided together/);
+  });
+
+  it('matches an existing vehicle created via the API under a different plate separator, by plateKey', async () => {
+    const ttRes = await upload('truck-types', 'code,name,category\nTTSEP,Trailer Sep,tractor\n', false);
+    expect(ttRes.json()).toMatchObject({ created: 1 });
+    const tt = await app.db.collection(C.truckTypes).findOne({ code: 'TTSEP' });
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/vehicles',
+      headers: h,
+      payload: { plate: '80-5678', part: 'head', truckTypeId: tt!._id.toHexString() },
+    });
+    expect(created.statusCode).toBe(201);
+    const createdId = created.json().id;
+    const res = await upload('vehicles', 'plate,part,truckTypeCode,gpsId\n80 5678,head,TTSEP,SEP-1\n', false);
+    expect(res.json()).toMatchObject({ created: 0, updated: 1 });
+    // Matched by plateKey, not by exact display text — same vehicle (same _id), now
+    // with the display plate and gpsId from the import row.
+    const doc = await app.db.collection(C.vehicles).findOne({ _id: new ObjectId(createdId) });
+    expect(doc?.gpsId).toBe('SEP-1');
+    expect(doc?.plate).toBe('80 5678');
   });
 
   it('rejects unknown entities', async () => {

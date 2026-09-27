@@ -10,6 +10,13 @@ export function normalizePlate(p: string): string {
   return p.trim().replace(/\s+/g, ' ').toUpperCase();
 }
 
+// A stricter matching key than the display-form `plate`: strips all whitespace, '-'
+// and '.' so visually-equivalent plates entered with different separators
+// (`1กข1234` / `1กข 1234` / `1กข-1234`) collide as the same vehicle.
+export function plateKey(p: string): string {
+  return normalizePlate(p).replace(/[\s\-.]/g, '');
+}
+
 export const VEHICLE_PARTS = ['head', 'tail', 'rigid'] as const;
 
 const VehicleBody = z.object({
@@ -29,7 +36,8 @@ export const vehiclesDef: ResourceDef = {
   refs: [{ path: 'truckTypeId', collection: C.truckTypes }],
   searchFields: ['plate', 'gpsId'],
   filterFields: [{ name: 'part' }, { name: 'truckTypeId', ref: true }],
-  toDb: (body) => (typeof body.plate === 'string' ? { ...body, plate: normalizePlate(body.plate) } : body),
+  toDb: (body) =>
+    typeof body.plate === 'string' ? { ...body, plate: normalizePlate(body.plate), plateKey: plateKey(body.plate) } : body,
   validate: async (merged, { db }) => {
     const tt = await db.collection(C.truckTypes).findOne({ _id: merged.truckTypeId as ObjectId });
     const isRigidPart = merged.part === 'rigid';

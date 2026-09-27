@@ -87,13 +87,18 @@ export async function runImport(
         if (seen.has(dupKey)) throw new RowError(`duplicate ${spec.key} "${dupKey}" earlier in this file`);
         seen.add(dupKey);
       }
-      const parsed = spec.def.body.safeParse(await spec.toBody(get, ctx));
+      const rawBody = await spec.toBody(get, ctx);
+      const existing = dupKey === null ? null : await coll.findOne({ [spec.dbKey]: dupKey });
+      // CREATE parses the full body so defaults apply (e.g. gpsVendor: null, isSite: false).
+      // UPDATE parses only the columns that were actually present and non-blank in this
+      // row, via `.partial()`, so a re-import that omits an optional column (or leaves
+      // it blank) never resets it back to that column's default.
+      const parsed = existing
+        ? spec.def.body.partial().safeParse(Object.fromEntries(Object.entries(rawBody).filter(([, v]) => v !== undefined)))
+        : spec.def.body.safeParse(rawBody);
       if (!parsed.success) {
         result.errors = parsed.error.issues.map((i) => `${i.path.join('.') || 'row'}: ${i.message}`);
       } else {
-        const keyValue = (spec.def.toDb ? spec.def.toDb({ ...parsed.data }) : parsed.data)[spec.key];
-        result.key = String(keyValue);
-        const existing = await coll.findOne({ [spec.key]: keyValue });
         const prepared = await prepareDoc(spec.def, db, parsed.data as Record<string, unknown>, existing);
         if (existing) {
           result.action = 'update';
