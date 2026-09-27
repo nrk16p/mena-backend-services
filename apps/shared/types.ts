@@ -39,9 +39,13 @@ export interface DriverShipment extends Shipment {
 
 export interface PodFile { fieldKey: string; key: string; sha256: string; mime: string; bytes: number }
 export interface Pod {
-  id: string; doId: string; shipmentId: string; outcome: 'DELIVERED' | 'FAILED'; reasonCode: string | null; note: string | null;
+  id: string; clientPodId: string; doId: string; shipmentId: string; stopId: string;
+  templateId: string | null; templateVersion: number; outcome: 'DELIVERED' | 'FAILED'; reasonCode: string | null; note: string | null;
   answers: Record<string, unknown>; files: PodFile[];
-  evidence: { deviceTime: string; receivedAt: string; lat: number | null; lng: number | null; accuracyM: number | null; geofenceDistanceM: number | null; offline: boolean };
+  evidence: {
+    deviceTime: string; receivedAt: string; lat: number | null; lng: number | null; accuracyM: number | null;
+    noGpsReason: string | null; geofenceDistanceM: number | null; device: string | null; appVersion: string | null; offline: boolean;
+  };
   hash: string; flags: string[]; status: 'submitted' | 'verified' | 'rejected'; review: { by: string; at: string; reason: string | null } | null;
-  supersedesPodId: string | null; fileUrls?: { key: string; url: string }[];
+  supersedesPodId: string | null; by: string; fileUrls?: { key: string; url: string }[];
 }
