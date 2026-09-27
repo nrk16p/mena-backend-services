@@ -57,32 +57,49 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
     return { items };
   });
 
-  app.post('/driver/shipments/:id/accept', { schema: { tags: ['driver'], params: IdParams, response: { 200: ShipmentItem } }, preHandler: driverOnly }, async (req) => {
-    const driverId = driverIdOf(req);
-    const existing = await loadMine(req.params.id, driverId);
-    const by = actorOf(req);
-    return shipmentView(
-      await transition(app, existing, {
-        version: existing.version,
-        from: ['DISPATCHED'],
-        set: { status: 'ACCEPTED', driverResponse: { status: 'ACCEPTED', reason: null, at: new Date(), by } },
-        action: 'accept',
-        by,
-        notAllowedCode: 'SHIPMENT_NOT_DISPATCHED',
-      }),
-    );
-  });
+  const VersionBody = z.object({ version: z.number().int().positive() });
 
   app.post(
-    '/driver/shipments/:id/decline',
-    { schema: { tags: ['driver'], params: IdParams, body: z.object({ reason: z.string().trim().min(3).max(500) }), response: { 200: ShipmentItem } }, preHandler: driverOnly },
+    '/driver/shipments/:id/accept',
+    { schema: { tags: ['driver'], params: IdParams, body: VersionBody, response: { 200: ShipmentItem } }, preHandler: driverOnly },
     async (req) => {
       const driverId = driverIdOf(req);
       const existing = await loadMine(req.params.id, driverId);
       const by = actorOf(req);
       return shipmentView(
         await transition(app, existing, {
-          version: existing.version,
+          // Bound to the version the driver's job list showed them (spec §5.1): if the planner
+          // edited and re-dispatched in the meantime, this is stale and `transition` reports
+          // 409 VERSION_CONFLICT instead of silently accepting a plan the driver never saw.
+          version: req.body.version,
+          from: ['DISPATCHED'],
+          set: { status: 'ACCEPTED', driverResponse: { status: 'ACCEPTED', reason: null, at: new Date(), by } },
+          action: 'accept',
+          by,
+          notAllowedCode: 'SHIPMENT_NOT_DISPATCHED',
+        }),
+      );
+    },
+  );
+
+  app.post(
+    '/driver/shipments/:id/decline',
+    {
+      schema: {
+        tags: ['driver'],
+        params: IdParams,
+        body: VersionBody.extend({ reason: z.string().trim().min(3).max(500) }),
+        response: { 200: ShipmentItem },
+      },
+      preHandler: driverOnly,
+    },
+    async (req) => {
+      const driverId = driverIdOf(req);
+      const existing = await loadMine(req.params.id, driverId);
+      const by = actorOf(req);
+      return shipmentView(
+        await transition(app, existing, {
+          version: req.body.version,
           from: ['DISPATCHED'],
           set: { status: 'PLANNED', dispatch: null, driverResponse: { status: 'DECLINED', reason: req.body.reason, at: new Date(), by } },
           action: 'decline',
