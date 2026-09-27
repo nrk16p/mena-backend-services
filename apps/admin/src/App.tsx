@@ -2,6 +2,7 @@ import { Navigate, createBrowserRouter, RouterProvider } from 'react-router-dom'
 import Layout from './components/Layout';
 import RequireAuth from './components/RequireAuth';
 import LoginPage from './pages/LoginPage';
+import DeliveryOrdersPage from './pages/DeliveryOrdersPage';
 
 const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
@@ -11,7 +12,10 @@ const router = createBrowserRouter([
         <Layout />
       </RequireAuth>
     ),
-    children: [{ path: '/', element: <Navigate to="/shipments" replace /> }],
+    children: [
+      { path: '/', element: <Navigate to="/shipments" replace /> },
+      { path: '/delivery-orders', element: <DeliveryOrdersPage /> },
+    ],
   },
 ]);
 
