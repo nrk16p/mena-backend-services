@@ -24,7 +24,7 @@ const BlockItem = z.object({
   from: z.string(),
   to: z.string(),
   note: z.string().nullable(),
-  source: z.enum(['manual', 'atms']),
+  source: z.enum(['manual', 'atms', 'hr']),
   cancelledAt: z.string().nullable(),
   createdBy: z.string(),
   createdAt: z.string(),
@@ -151,7 +151,7 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
       { returnDocument: 'after' },
     );
     if (!updated) throw unprocessable('BLOCK_CANCELLED', 'The block is already cancelled');
-    await writeAudit(app.db, { entity: 'resourceBlock', entityId: req.params.id, action: 'cancel', by });
+    await writeAudit(app.db, { entity: 'resourceBlock', entityId: req.params.id, action: 'cancel', by, before: toApi(existing), after: toApi(updated) });
     return toApi(updated);
   });
 };

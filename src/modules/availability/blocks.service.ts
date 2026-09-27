@@ -19,7 +19,7 @@ export interface BlockDoc {
   from: Date;
   to: Date;
   note: string | null;
-  source: 'manual' | 'atms';
+  source: 'manual' | 'atms' | 'hr';
   cancelledAt: Date | null;
   createdBy: string;
   createdAt: Date;
