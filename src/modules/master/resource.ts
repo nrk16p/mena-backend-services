@@ -57,7 +57,9 @@ async function convertRef(db: Db, doc: Obj, ref: RefSpec): Promise<void> {
   const raw = getPath(doc, ref.path);
   if (raw === undefined || raw === null) return;
   const hexes = ref.many ? (raw as string[]) : [raw as string];
-  const ids = [...new Set(hexes)].map((h) => new ObjectId(h));
+  // De-dup while preserving first-occurrence order (Set preserves insertion order).
+  const dedupedHexes = [...new Set(hexes)];
+  const ids = dedupedHexes.map((h) => new ObjectId(h));
   if (ids.length > 0) {
     const found = await db.collection(ref.collection).find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray();
     const foundSet = new Set(found.map((d) => d._id.toHexString()));
@@ -66,7 +68,7 @@ async function convertRef(db: Db, doc: Obj, ref: RefSpec): Promise<void> {
       throw unprocessable('INVALID_REFERENCE', `${ref.path} references unknown ${ref.collection}`, { field: ref.path, missing });
     }
   }
-  setPath(doc, ref.path, ref.many ? hexes.map((h) => new ObjectId(h)) : new ObjectId(hexes[0]!));
+  setPath(doc, ref.path, ref.many ? ids : ids[0]!);
 }
 
 export async function prepareDoc(
@@ -76,7 +78,10 @@ export async function prepareDoc(
   existing: Document | null,
   parentFields: Obj = {},
 ): Promise<Obj> {
-  const doc = def.toDb ? def.toDb({ ...body }) : { ...body };
+  // Deep-clone so toDb/convertRef can freely walk and rewrite nested paths
+  // (e.g. `criteria.zoneIds`) without ever mutating the caller's body, at any depth.
+  const clone = structuredClone(body);
+  const doc = def.toDb ? def.toDb(clone) : clone;
   for (const ref of def.refs ?? []) await convertRef(db, doc, ref);
   if (def.validate) {
     const merged = { ...(existing ?? {}), ...parentFields, ...doc };
