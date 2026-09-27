@@ -76,3 +76,18 @@ SEED_ADMIN_USERNAME=admin SEED_ADMIN_PASSWORD=irrelevant npm run seed -- --force
 
 This reactivates the user and adds back the `admin` role without touching the existing
 password.
+
+## Planning (Plan 2)
+
+Flow: create delivery orders (`POST /delivery-orders` or `/delivery-orders/bulk`) → build a shipment (`POST /shipments` with `doIds` for automatic stops, or explicit `stops`) → check it any time with `POST /shipments/validate` → `POST /shipments/:id/plan` → `POST /shipments/:id/dispatch` → the driver accepts or declines (`/driver/shipments/:id/accept|decline`).
+
+- Shipments carry a `version`; send the version you last read with every change. A stale version gets `409 VERSION_CONFLICT`.
+- A DRAFT may be incomplete (missing vehicle, driver, stops, DOs come back as warnings) but never conflicting. Planning requires completeness.
+- Editing a dispatched or accepted shipment returns it to PLANNED; dispatch it again.
+- Mixer round trips: create many shipments at once with `POST /shipments/bulk`.
+
+### Availability and status codes
+
+- `GET /status-codes` — the two-level catalogue: `level1` is `working` / `not_working`, `code` is the detail (ATMS codes such as `A`, `A50`, `ล`, `ป`; planning codes such as `PM`, `REPAIR`, `TIRE`, `LEAVE`). Codes named `ATMS … (รอยืนยันความหมาย)` need their meaning confirmed by the PO (admin can rename them).
+- `POST /resource-blocks` — mark a truck or driver unavailable for a period with a status code. Codes with `blocksAssignment: true` stop assignment; `OTHER` only warns.
+- `GET /holidays`, drivers' `weeklyDaysOff` — produce warnings, never block.

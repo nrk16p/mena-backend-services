@@ -3,9 +3,9 @@ import { ObjectId, type Filter } from 'mongodb';
 import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { actorOf } from '../../lib/audit.js';
-import { notFound, unprocessable } from '../../lib/errors.js';
+import { AppError, notFound, unprocessable } from '../../lib/errors.js';
 import { IdParams, objectIdString } from '../../lib/ids.js';
-import { IssueSchema } from '../../lib/issues.js';
+import { IssueSchema, type Issue } from '../../lib/issues.js';
 import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
@@ -83,6 +83,39 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
       }
       const page = await paginate(coll(), and.length > 0 ? { $and: and } : {}, q);
       return { items: page.items.map(shipmentView), nextCursor: page.nextCursor };
+    },
+  );
+
+  const BulkShipmentResult = z.object({
+    index: z.number(),
+    ok: z.boolean(),
+    id: z.string().nullable(),
+    shipmentNo: z.string().nullable(),
+    errors: z.array(IssueSchema),
+    warnings: z.array(IssueSchema),
+  });
+
+  app.post(
+    '/shipments/bulk',
+    { schema: { tags: ['shipments'], body: z.object({ items: z.array(ShipmentInput).min(1).max(100) }), response: { 200: z.object({ results: z.array(BulkShipmentResult) }) } }, preHandler: write },
+    async (req) => {
+      const by = actorOf(req);
+      const results: z.infer<typeof BulkShipmentResult>[] = [];
+      for (const [index, input] of req.body.items.entries()) {
+        try {
+          const { doc, warnings } = await createShipment(app, input, by);
+          results.push({ index, ok: true, id: doc._id.toHexString(), shipmentNo: doc.shipmentNo, errors: [], warnings });
+        } catch (e) {
+          if (!(e instanceof AppError)) throw e;
+          const details = e.details as { errors?: Issue[]; warnings?: Issue[] } | undefined;
+          results.push({
+            index, ok: false, id: null, shipmentNo: null,
+            errors: details?.errors ?? [{ code: e.code, message: e.message }],
+            warnings: details?.warnings ?? [],
+          });
+        }
+      }
+      return { results };
     },
   );
 
