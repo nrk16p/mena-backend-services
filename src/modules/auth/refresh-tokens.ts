@@ -62,6 +62,26 @@ async function revokeFamily(db: Db, familyId: ObjectId): Promise<void> {
     .updateMany({ familyId, revokedAt: null }, { $set: { revokedAt: new Date() } });
 }
 
+// Shared decision for a token that has already been replaced or revoked, used both
+// by the sequential path (doc read as already-used) and the race path (this call
+// lost the atomic claim to a concurrent rotation). Keeping this in one place means
+// the two paths can't silently drift apart.
+// - revoked                          -> revoke the family, reject as reused
+// - replaced within the grace window -> a quick retry; return the same result
+// - replaced outside the grace window -> revoke the family, reject as reused
+async function resolveReplayState(
+  db: Db,
+  doc: RefreshTokenDoc,
+  now: Date,
+  graceSec: number,
+): Promise<{ userId: ObjectId; familyId: ObjectId }> {
+  if (!doc.revokedAt && doc.replacedAt && now.getTime() - doc.replacedAt.getTime() <= graceSec * 1000) {
+    return { userId: doc.userId, familyId: doc.familyId };
+  }
+  await revokeFamily(db, doc.familyId);
+  throw reused();
+}
+
 export async function rotateRefreshToken(
   db: Db,
   token: string,
@@ -73,28 +93,21 @@ export async function rotateRefreshToken(
   const doc = await coll.findOne({ _id: parsed.id });
   if (!doc || !hashMatches(doc.tokenHash, parsed.secret)) throw invalid();
   const now = new Date();
-  if (doc.revokedAt) {
-    await revokeFamily(db, doc.familyId);
-    throw reused();
-  }
+  if (doc.revokedAt) return resolveReplayState(db, doc, now, graceSec);
   if (doc.expiresAt <= now) throw invalid();
-  if (doc.replacedAt) {
-    // A quick retry (lost response on a mobile network) is allowed; anything later is treated as theft.
-    if (now.getTime() - doc.replacedAt.getTime() <= graceSec * 1000) {
-      return { userId: doc.userId, familyId: doc.familyId };
-    }
-    await revokeFamily(db, doc.familyId);
-    throw reused();
-  }
+  if (doc.replacedAt) return resolveReplayState(db, doc, now, graceSec);
+
   const updated = await coll.findOneAndUpdate(
     { _id: doc._id, replacedAt: null, revokedAt: null },
     { $set: { replacedAt: now } },
   );
-  if (!updated && graceSec === 0) {
-    await revokeFamily(db, doc.familyId);
-    throw reused();
-  }
-  return { userId: doc.userId, familyId: doc.familyId };
+  if (updated) return { userId: doc.userId, familyId: doc.familyId };
+
+  // Lost the race: another concurrent call claimed this token first. Re-read its
+  // current state and apply the same replay rules instead of assuming success.
+  const fresh = await coll.findOne({ _id: doc._id });
+  if (!fresh) throw invalid();
+  return resolveReplayState(db, fresh, new Date(), graceSec);
 }
 
 export async function revokeRefreshToken(db: Db, token: string): Promise<void> {

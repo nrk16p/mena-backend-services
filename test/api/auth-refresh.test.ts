@@ -30,6 +30,12 @@ describe('refresh tokens (default 30 s reuse grace)', () => {
     expect(b.statusCode).toBe(200);
   });
 
+  it('tolerates several concurrent refreshes of the same token (race bounded by the grace window)', async () => {
+    const { refreshToken } = await createUserAndLogin(app, ['planner']);
+    const results = await Promise.all(Array.from({ length: 5 }, () => refresh(app, refreshToken)));
+    for (const res of results) expect(res.statusCode).toBe(200);
+  });
+
   it('rejects garbage tokens', async () => {
     expect((await refresh(app, 'nope')).json().code).toBe('INVALID_REFRESH_TOKEN');
     expect((await refresh(app, `${'a'.repeat(24)}.xyz`)).statusCode).toBe(401);
@@ -65,6 +71,12 @@ describe('refresh tokens (default 30 s reuse grace)', () => {
       .toArray();
     expect(entries).toHaveLength(1);
     expect(JSON.stringify(entries[0])).not.toContain('passwordHash');
+
+    // Login, the failed refresh checks, and the password change itself must be the
+    // ONLY audit-worthy thing here: exactly one auditLog doc for this user, period.
+    const allEntriesForUser = await app.db.collection(C.auditLog).find({ entityId: user._id.toHexString() }).toArray();
+    expect(allEntriesForUser).toHaveLength(1);
+    expect(allEntriesForUser[0].by).toBe(user.username);
   });
 });
 
@@ -83,5 +95,16 @@ describe('refresh token reuse detection (no grace)', () => {
     expect(replay.statusCode).toBe(401);
     expect(replay.json().code).toBe('REFRESH_TOKEN_REUSED');
     expect((await refresh(app, first.json().refreshToken)).statusCode).toBe(401);
+  });
+
+  it('bounds a concurrent refresh race: at most one wins, and the family ends up revoked', async () => {
+    const { refreshToken } = await createUserAndLogin(app, ['planner']);
+    const results = await Promise.all(Array.from({ length: 5 }, () => refresh(app, refreshToken)));
+    const successes = results.filter((r) => r.statusCode === 200);
+    expect(successes.length).toBeLessThanOrEqual(1);
+    for (const res of successes) {
+      const nextToken = res.json().refreshToken as string;
+      expect((await refresh(app, nextToken)).statusCode).toBe(401);
+    }
   });
 });
