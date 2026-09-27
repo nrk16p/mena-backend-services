@@ -7,6 +7,7 @@ import errorsPlugin from './plugins/errors.js';
 import authPlugin from './plugins/auth.js';
 import mongoPlugin from './plugins/mongo.js';
 import openapiPlugin from './plugins/openapi.js';
+import storagePlugin from './plugins/storage.js';
 import { apiRoutes } from './routes.js';
 
 // Fastify's own `trustProxy: number` support fails closed (trusts nothing) as of the
@@ -32,6 +33,7 @@ export async function buildApp(config: Config) {
   await app.register(errorsPlugin);
   await app.register(openapiPlugin);
   await app.register(mongoPlugin);
+  await app.register(storagePlugin);
 
   await app.register(rateLimit, {
     global: false,

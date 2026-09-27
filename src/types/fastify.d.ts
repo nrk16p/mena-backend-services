@@ -1,10 +1,12 @@
 import type { Db, MongoClient } from 'mongodb';
 import type { Config } from '../config.js';
+import type { Storage } from '../modules/storage/storage.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
     config: Config;
     mongo: MongoClient;
     db: Db;
+    storage: Storage;
   }
 }

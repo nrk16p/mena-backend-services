@@ -54,4 +54,15 @@ describe('loadConfig', () => {
     expect(c.MONGO_BATCH_TIMEOUT_MS).toBe(30000);
     expect(loadConfig({ ...base, MONGO_BATCH_TIMEOUT_MS: '9000' }).MONGO_BATCH_TIMEOUT_MS).toBe(9000);
   });
+
+  it('defaults to memory storage and requires Spaces settings for s3', () => {
+    expect(loadConfig(base).STORAGE_DRIVER).toBe('memory');
+    expect(loadConfig(base).UPLOAD_MAX_BYTES).toBe(5 * 1024 * 1024);
+    expect(() => loadConfig({ ...base, STORAGE_DRIVER: 's3' })).toThrow(/SPACES_BUCKET/);
+    const s3 = loadConfig({
+      ...base, STORAGE_DRIVER: 's3', SPACES_ENDPOINT: 'https://sgp1.digitaloceanspaces.com',
+      SPACES_BUCKET: 'b', SPACES_KEY: 'k', SPACES_SECRET: 's',
+    });
+    expect(s3.SPACES_REGION).toBe('sgp1');
+  });
 });

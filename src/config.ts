@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-const EnvSchema = z.object({
+const BaseEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -28,6 +28,21 @@ const EnvSchema = z.object({
     .refine((v) => v === 'true' || v === 'false' || /^[1-9]\d*$/.test(v), {
       message: 'TRUST_PROXY must be "true", "false", or a positive integer hop count',
     }),
+  STORAGE_DRIVER: z.enum(['s3', 'memory']).default('memory'),
+  SPACES_ENDPOINT: z.string().url().optional(),
+  SPACES_REGION: z.string().default('sgp1'),
+  SPACES_BUCKET: z.string().min(1).optional(),
+  SPACES_KEY: z.string().min(1).optional(),
+  SPACES_SECRET: z.string().min(1).optional(),
+  UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
+  PUBLIC_BASE_URL: z.string().url().default('http://localhost:3000'),
+});
+
+const EnvSchema = BaseEnvSchema.superRefine((env, ctx) => {
+  if (env.STORAGE_DRIVER !== 's3') return;
+  for (const k of ['SPACES_ENDPOINT', 'SPACES_BUCKET', 'SPACES_KEY', 'SPACES_SECRET'] as const) {
+    if (!env[k]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [k], message: `${k} is required when STORAGE_DRIVER=s3` });
+  }
 });
 
 export type Config = z.infer<typeof EnvSchema>;

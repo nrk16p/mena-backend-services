@@ -3,11 +3,11 @@ import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { actorOf } from '../../lib/audit.js';
-import { AppError, notFound } from '../../lib/errors.js';
 import { IdParams } from '../../lib/ids.js';
 import { toApi } from '../../lib/serialize.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import { DoItem } from '../orders/orders.schemas.js';
+import { driverIdOf, driverScope, loadDriverShipment } from './driver-access.js';
 import { ShipmentItem } from './shipment.schemas.js';
 import { doIdsOf, shipmentView, transition } from './shipment.service.js';
 import type { ShipmentDoc } from './shipment.types.js';
@@ -19,22 +19,10 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
   const driverOnly = app.requireRoles('driver');
   const coll = () => app.db.collection<ShipmentDoc>(C.shipments);
 
-  const driverIdOf = (req: { principal: unknown }) => {
-    const p = req.principal as { kind: string; driverId: string | null } | null;
-    if (!p || p.kind !== 'user' || !p.driverId) throw new AppError(403, 'NOT_A_DRIVER', 'This user is not linked to a driver');
-    return new ObjectId(p.driverId);
-  };
-  const mine = (driverId: ObjectId) => ({ $or: [{ 'head.driverId': driverId }, { 'tail.driverId': driverId }] });
-  const loadMine = async (id: string, driverId: ObjectId) => {
-    const doc = await coll().findOne({ _id: new ObjectId(id), ...mine(driverId) });
-    if (!doc) throw notFound('Shipment');
-    return doc;
-  };
-
   app.get('/driver/shipments', { schema: { tags: ['driver'], response: { 200: z.object({ items: z.array(DriverShipment) }) } }, preHandler: driverOnly }, async (req) => {
     const driverId = driverIdOf(req);
     const docs = await coll()
-      .find({ status: { $in: ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT'] }, ...mine(driverId) })
+      .find({ status: { $in: ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT'] }, ...driverScope(driverId) })
       .sort({ plannedStart: 1 })
       .limit(50)
       .toArray();
@@ -64,7 +52,7 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
     { schema: { tags: ['driver'], params: IdParams, body: VersionBody, response: { 200: ShipmentItem } }, preHandler: driverOnly },
     async (req) => {
       const driverId = driverIdOf(req);
-      const existing = await loadMine(req.params.id, driverId);
+      const existing = await loadDriverShipment(app.db, new ObjectId(req.params.id), driverId);
       const by = actorOf(req);
       return shipmentView(
         await transition(app, existing, {
@@ -95,7 +83,7 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
     },
     async (req) => {
       const driverId = driverIdOf(req);
-      const existing = await loadMine(req.params.id, driverId);
+      const existing = await loadDriverShipment(app.db, new ObjectId(req.params.id), driverId);
       const by = actorOf(req);
       return shipmentView(
         await transition(app, existing, {
