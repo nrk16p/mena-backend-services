@@ -17,6 +17,32 @@ export const BASE_PALLET_MOVEMENT_TYPES = [
   { code: 'RETURN_CUSTOMER', name: 'คืนลค.', sign: -1 },
 ] as const;
 
+const UNCONFIRMED_WORKING = ['Aล', 'Aส', 'Aซ', 'Aค', 'Aน', 'Aป'];
+const UNCONFIRMED_NOT_WORKING = ['ล', 'ป', 'ก', 'ฝ', 'ลพ', 'ลอ', 'ย', 'ลข', 'ลส', 'ปอ', 'จ', 'ลฃ'];
+
+export const BASE_STATUS_CODES = [
+  // Planning codes used by resource blocks.
+  { code: 'PM', name: 'เข้า PM เช็คระยะ', level1: 'not_working', appliesTo: 'vehicle', blocksAssignment: true },
+  { code: 'REPAIR', name: 'ซ่อม', level1: 'not_working', appliesTo: 'vehicle', blocksAssignment: true },
+  { code: 'TIRE', name: 'เปลี่ยนยาง', level1: 'not_working', appliesTo: 'vehicle', blocksAssignment: true },
+  { code: 'INSPECTION', name: 'ตรวจสภาพ / ต่อภาษี', level1: 'not_working', appliesTo: 'vehicle', blocksAssignment: true },
+  { code: 'LEAVE', name: 'ลา', level1: 'not_working', appliesTo: 'driver', blocksAssignment: true },
+  { code: 'SICK', name: 'ลาป่วย', level1: 'not_working', appliesTo: 'driver', blocksAssignment: true },
+  { code: 'HOLIDAY', name: 'วันหยุด', level1: 'not_working', appliesTo: 'driver', blocksAssignment: true },
+  { code: 'TRAINING', name: 'อบรม', level1: 'not_working', appliesTo: 'driver', blocksAssignment: true },
+  { code: 'OTHER', name: 'อื่น ๆ', level1: 'not_working', appliesTo: 'both', blocksAssignment: false },
+  // ATMS daily status codes (atms.vehicle_daily_asia, field คนขับ): codes starting with A are working.
+  { code: 'A', name: 'ทำงานปกติ', level1: 'working', appliesTo: 'both', blocksAssignment: false },
+  { code: 'A50', name: 'ทำงาน 4 ชม.', level1: 'working', appliesTo: 'both', blocksAssignment: false },
+  { code: 'Aอส', name: 'รถโอนสาย', level1: 'working', appliesTo: 'both', blocksAssignment: false },
+  ...UNCONFIRMED_WORKING.map((code) => ({
+    code, name: `ATMS ${code} (รอยืนยันความหมาย)`, level1: 'working', appliesTo: 'both', blocksAssignment: false,
+  })),
+  ...UNCONFIRMED_NOT_WORKING.map((code) => ({
+    code, name: `ATMS ${code} (รอยืนยันความหมาย)`, level1: 'not_working', appliesTo: 'both', blocksAssignment: true,
+  })),
+] as const;
+
 // Inserts by `code` only when missing, so later edits in the admin panel are never overwritten.
 async function upsertByCode(db: Db, collection: string, doc: Document): Promise<ObjectId> {
   const now = new Date();
@@ -31,6 +57,7 @@ async function upsertByCode(db: Db, collection: string, doc: Document): Promise<
 export async function seedBase(db: Db): Promise<void> {
   for (const t of BASE_TRUCK_TYPES) await upsertByCode(db, C.truckTypes, { ...t });
   for (const p of BASE_PALLET_MOVEMENT_TYPES) await upsertByCode(db, C.palletMovementTypes, { ...p });
+  for (const s of BASE_STATUS_CODES) await upsertByCode(db, C.statusCodes, { ...s });
 }
 
 export async function seedAdmin(

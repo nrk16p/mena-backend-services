@@ -5,7 +5,7 @@ import { ensureIndexes } from '../../src/db/indexes.js';
 import { verifyPassword } from '../../src/lib/passwords.js';
 import { matchJobGroupForDo } from '../../src/modules/master/job-groups.js';
 import { findUserByUsername } from '../../src/modules/users/users.repo.js';
-import { seedAdmin, seedBase, seedDemo } from '../../src/seed/seed.js';
+import { BASE_STATUS_CODES, seedAdmin, seedBase, seedDemo } from '../../src/seed/seed.js';
 import { testDb } from '../helpers/db.js';
 
 describe('seed', () => {
@@ -23,6 +23,9 @@ describe('seed', () => {
     await seedBase(db);
     expect(await db.collection(C.truckTypes).countDocuments()).toBe(5);
     expect(await db.collection(C.palletMovementTypes).countDocuments()).toBe(4);
+    expect(await db.collection(C.statusCodes).countDocuments()).toBe(BASE_STATUS_CODES.length);
+    expect(await db.collection(C.statusCodes).findOne({ code: 'A' })).toMatchObject({ level1: 'working', blocksAssignment: false });
+    expect(await db.collection(C.statusCodes).findOne({ code: 'PM' })).toMatchObject({ level1: 'not_working', appliesTo: 'vehicle', blocksAssignment: true });
     expect((await db.collection(C.truckTypes).findOne({ code: 'MIXER' }))?.name).toBe('Mixer 6 คิว');
   });
 

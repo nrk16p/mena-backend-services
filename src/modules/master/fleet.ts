@@ -54,6 +54,7 @@ const DriverBody = z.object({
   phone: z.string().trim().max(30).nullable().default(null),
   licenseType: z.string().trim().max(30).nullable().default(null),
   licenseExpiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be YYYY-MM-DD').nullable().default(null),
+  weeklyDaysOff: z.array(z.number().int().min(0).max(6)).max(7).default([]),
 });
 
 export const driversDef: ResourceDef = {

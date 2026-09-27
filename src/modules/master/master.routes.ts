@@ -4,6 +4,7 @@ import { clientsDef, materialsDef, palletMovementTypesDef, serviceTypesDef, truc
 import { driversDef, vehiclesDef } from './fleet.js';
 import { jobGroupMatchRoutes, jobGroupsDef } from './job-groups.js';
 import { locationsDef } from './locations.js';
+import { holidaysDef, statusCodesDef } from '../availability/status-codes.js';
 
 export const ALL_RESOURCE_DEFS: ResourceDef[] = [
   clientsDef,
@@ -16,6 +17,8 @@ export const ALL_RESOURCE_DEFS: ResourceDef[] = [
   vehiclesDef,
   driversDef,
   jobGroupsDef,
+  statusCodesDef,
+  holidaysDef,
 ];
 
 export const masterRoutes: FastifyPluginAsyncZod = async (app) => {

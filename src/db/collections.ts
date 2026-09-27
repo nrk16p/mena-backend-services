@@ -15,4 +15,9 @@ export const C = {
   drivers: 'drivers',
   palletMovementTypes: 'palletMovementTypes',
   podTemplates: 'podTemplates',
+  statusCodes: 'statusCodes',
+  holidays: 'holidays',
+  resourceBlocks: 'resourceBlocks',
+  deliveryOrders: 'deliveryOrders',
+  shipments: 'shipments',
 } as const;

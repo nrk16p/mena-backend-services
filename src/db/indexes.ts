@@ -33,6 +33,8 @@ export const INDEXES: Record<string, IndexDescription[]> = {
       partialFilterExpression: { status: 'published' },
     },
   ],
+  [C.statusCodes]: [{ key: { code: 1 }, unique: true }],
+  [C.holidays]: [{ key: { date: 1 }, unique: true }],
 };
 
 export async function ensureIndexes(db: Db): Promise<void> {
