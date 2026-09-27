@@ -11,9 +11,13 @@ import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
 import { withTransaction } from '../../lib/tx.js';
+import type { ShipmentDoc } from '../shipments/shipment.types.js';
 import { DO_STATUSES, type DeliveryOrderDoc } from './order.types.js';
 import { DoFields, DoItem, DoWithWarnings, PatchDoBody } from './orders.schemas.js';
 import { prepareDoFields, updateDoIfUnchanged } from './orders.service.js';
+
+/** The two job-group warning codes `jobGroupWarnings` can put on a shipment (see orders.service.ts). */
+const JOB_GROUP_WARNING_CODES = ['JOB_GROUP_NONE', 'JOB_GROUP_AMBIGUOUS'];
 
 export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
   const read = app.requireRoles(...STAFF_ROLES);
@@ -197,6 +201,65 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
       if (!updated) throw conflict('DO_CHANGED', 'The delivery order changed; reload and try again');
       await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'update', by, before: toApi(existing), after: toApi(updated) });
       return { ...toApi(updated), warnings };
+    },
+  );
+
+  app.post(
+    '/delivery-orders/:id/job-group',
+    {
+      schema: {
+        tags: ['delivery-orders'],
+        description:
+          'Manually assigns a job group to a delivery order, at any status except CANCELLED. Unlike PATCH ' +
+          '(which only accepts a DO in UNASSIGNED or PLANNED), this is the only way to give a job group to a ' +
+          'DO that already moved past PLANNED — the usual way a DO ends up blocking close with JOB_GROUP_REQUIRED.',
+        params: IdParams,
+        body: z.object({ jobGroupId: objectIdString }),
+        response: { 200: DoItem },
+      },
+      preHandler: write,
+    },
+    async (req) => {
+      const existing = await load(req.params.id);
+      if (existing.status === 'CANCELLED') throw unprocessable('DO_NOT_EDITABLE', 'A CANCELLED delivery order cannot be edited');
+      const jobGroupId = new ObjectId(req.body.jobGroupId);
+      const group = await app.db.collection(C.jobGroups).findOne({ _id: jobGroupId, clientId: existing.clientId, active: true });
+      if (!group) throw unprocessable('INVALID_REFERENCE', 'jobGroupId must be an active job group of the same client');
+      const by = actorOf(req);
+      const now = new Date();
+      const updated = await withTransaction(app.mongo, async (session) => {
+        if (existing.shipmentId) {
+          const shipment = await app.db
+            .collection<ShipmentDoc>(C.shipments)
+            .findOne({ _id: existing.shipmentId }, { session, projection: { status: 1 } });
+          if (shipment?.status === 'CLOSED') {
+            throw unprocessable('DO_LOCKED_BY_SHIPMENT', 'The delivery order is on a closed shipment; its job group can no longer change');
+          }
+        }
+        const upd = await coll().findOneAndUpdate(
+          { _id: existing._id, status: existing.status, shipmentId: existing.shipmentId },
+          { $set: { jobGroupId, jobGroupMatch: { status: 'manual', candidates: [] }, updatedBy: by, updatedAt: now } },
+          { returnDocument: 'after', session },
+        );
+        if (!upd) throw conflict('DO_CHANGED', 'The delivery order changed; reload and try again');
+        if (existing.shipmentId) {
+          // The DO now has a group, so drop its own JOB_GROUP_NONE/AMBIGUOUS warnings from the
+          // shipment (spec fix: this is a targeted field edit, not a planning re-validation, so
+          // it does not bump the shipment's version).
+          await app.db.collection<ShipmentDoc>(C.shipments).updateOne(
+            { _id: existing.shipmentId },
+            { $pull: { warnings: { code: { $in: JOB_GROUP_WARNING_CODES }, details: { doNo: existing.doNo } } } },
+            { session },
+          );
+        }
+        await writeAudit(
+          app.db,
+          { entity: 'deliveryOrder', entityId: existing._id.toHexString(), action: 'job-group', by, before: toApi(existing), after: toApi(upd) },
+          { session },
+        );
+        return upd;
+      });
+      return toApi(updated);
     },
   );
 
