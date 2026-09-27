@@ -38,19 +38,22 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
       .sort({ plannedStart: 1 })
       .limit(50)
       .toArray();
-    const items = [];
-    for (const doc of docs) {
-      const dos = await app.db.collection<DeliveryOrderDoc>(C.deliveryOrders).find({ _id: { $in: doIdsOf(doc.stops) } }).toArray();
-      const locs = await app.db.collection(C.locations).find({ _id: { $in: doc.stops.map((s) => s.locationId) } }).toArray();
-      items.push({
-        ...shipmentView(doc),
-        deliveryOrders: dos.map(toApi),
-        locations: locs.map((l) => ({
-          id: l._id.toHexString(), code: l.code, name: l.name,
-          lat: l.geo.coordinates[1], lng: l.geo.coordinates[0], geofenceRadiusM: l.geofenceRadiusM,
-        })),
-      });
-    }
+    const allDoIds = docs.flatMap((d) => doIdsOf(d.stops));
+    const allLocIds = docs.flatMap((d) => d.stops.map((s) => s.locationId));
+    const [dos, locs] = await Promise.all([
+      app.db.collection<DeliveryOrderDoc>(C.deliveryOrders).find({ _id: { $in: allDoIds } }).toArray(),
+      app.db.collection(C.locations).find({ _id: { $in: allLocIds } }).toArray(),
+    ]);
+    const doById = new Map(dos.map((d) => [d._id.toHexString(), d]));
+    const locById = new Map(locs.map((l) => [l._id.toHexString(), l]));
+    const items = docs.map((doc) => ({
+      ...shipmentView(doc),
+      deliveryOrders: doIdsOf(doc.stops).map((id) => doById.get(id.toHexString())).filter((d): d is DeliveryOrderDoc => !!d).map(toApi),
+      locations: [...new Set(doc.stops.map((s) => s.locationId.toHexString()))]
+        .map((id) => locById.get(id))
+        .filter((l): l is NonNullable<typeof l> => !!l)
+        .map((l) => ({ id: l._id.toHexString(), code: l.code, name: l.name, lat: l.geo.coordinates[1], lng: l.geo.coordinates[0], geofenceRadiusM: l.geofenceRadiusM })),
+    }));
     return { items };
   });
 

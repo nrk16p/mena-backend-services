@@ -152,7 +152,13 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
         } as DeliveryOrderDoc);
       }
       await withTransaction(app.mongo, async (session) => {
-        await coll().insertMany(docs, { session });
+        // `insertMany` calls `bulkWrite` internally, which resolves its options twice and
+        // rejects with "An operation cannot be given a timeoutMS setting when inside a
+        // withTransaction call that has a timeoutMS setting" once the client has a `timeoutMS`
+        // (our MONGO_TIMEOUT_MS guardrail) and the write runs inside a convenient
+        // `session.withTransaction()` — see the longer note in imports.service.ts. Insert one
+        // at a time instead; still one atomic transaction, same rollback semantics.
+        for (const doc of docs) await coll().insertOne(doc, { session });
         await writeAudit(
           app.db,
           { entity: 'deliveryOrder', entityId: 'bulk', action: 'bulk-create', by, after: { doNos: docs.map((d) => d.doNo) } },

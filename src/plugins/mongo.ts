@@ -4,7 +4,10 @@ import { ensureIndexes } from '../db/indexes.js';
 
 export default fp(
   async (app) => {
-    const client = new MongoClient(app.config.MONGO_URI);
+    const client = new MongoClient(app.config.MONGO_URI, {
+      timeoutMS: app.config.MONGO_TIMEOUT_MS,
+      maxPoolSize: app.config.MONGO_MAX_POOL_SIZE,
+    });
     await client.connect();
     const db = client.db(app.config.MONGO_DB);
     await ensureIndexes(db);

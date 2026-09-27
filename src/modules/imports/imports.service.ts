@@ -1,4 +1,4 @@
-import { ObjectId, type AnyBulkWriteOperation, type Db, type Document, type MongoClient } from 'mongodb';
+import { ObjectId, type AnyBulkWriteOperation, type ClientSession, type Db, type Document, type MongoClient } from 'mongodb';
 import { AppError, unprocessable } from '../../lib/errors.js';
 import { writeAudit } from '../../lib/audit.js';
 import { prepareDoc } from '../master/resource.js';
@@ -23,6 +23,37 @@ export interface ImportReport {
 }
 
 /**
+ * Applies one bulk-write-shaped operation directly (insertOne/updateOne/etc.) rather than
+ * through `Collection.bulkWrite()`. The MongoDB driver's `bulkWrite()` resolves its options
+ * twice (once in `bulkWrite`, again inside `initializeOrderedBulkOp`/`initializeUnorderedBulkOp`),
+ * and the second resolution rejects with "An operation cannot be given a timeoutMS setting
+ * when inside a withTransaction call that has a timeoutMS setting" whenever the client has a
+ * `timeoutMS` (our `MONGO_TIMEOUT_MS` guardrail) and the write runs inside a convenient
+ * `session.withTransaction()` — this is true even though we never pass `timeoutMS` ourselves;
+ * it's inherited from the client and only surfaces because of `bulkWrite`'s double resolution.
+ * Executing ops one at a time with the plain single-document methods sidesteps that entirely
+ * while staying inside the same transaction (so atomicity/rollback is unaffected) and preserves
+ * ordered (stop-on-first-error) semantics via the `for` loop below.
+ */
+async function applyOp(coll: ReturnType<Db['collection']>, op: AnyBulkWriteOperation<Document>, session: ClientSession): Promise<void> {
+  if ('insertOne' in op) {
+    await coll.insertOne(op.insertOne.document, { session });
+  } else if ('updateOne' in op) {
+    await coll.updateOne(op.updateOne.filter, op.updateOne.update, { session, upsert: op.updateOne.upsert });
+  } else if ('updateMany' in op) {
+    await coll.updateMany(op.updateMany.filter, op.updateMany.update, { session, upsert: op.updateMany.upsert });
+  } else if ('replaceOne' in op) {
+    await coll.replaceOne(op.replaceOne.filter, op.replaceOne.replacement, { session, upsert: op.replaceOne.upsert });
+  } else if ('deleteOne' in op) {
+    await coll.deleteOne(op.deleteOne.filter, { session });
+  } else if ('deleteMany' in op) {
+    await coll.deleteMany(op.deleteMany.filter, { session });
+  } else {
+    throw new Error('Unsupported bulk write operation kind');
+  }
+}
+
+/**
  * Runs the bulk write and its accompanying audit entry inside one MongoDB
  * transaction, so a mid-batch failure (e.g. a unique-index conflict that
  * only surfaces at write time) leaves no partial writes behind. Exported so
@@ -39,7 +70,8 @@ export async function applyImportWrites(
   const session = mongo.startSession();
   try {
     await session.withTransaction(async () => {
-      if (ops.length > 0) await db.collection(collection).bulkWrite(ops, { ordered: true, session });
+      const coll = db.collection(collection);
+      for (const op of ops) await applyOp(coll, op, session);
       await writeAudit(db, audit, { session });
     });
   } finally {

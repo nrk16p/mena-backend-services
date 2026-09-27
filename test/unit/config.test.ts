@@ -41,4 +41,11 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, TRUST_PROXY: 'yes' })).toThrow(/TRUST_PROXY/);
     expect(() => loadConfig({ ...base, TRUST_PROXY: '0' })).toThrow(/TRUST_PROXY/);
   });
+
+  it('bounds Mongo operations and pool size by default', () => {
+    const c = loadConfig(base);
+    expect(c.MONGO_TIMEOUT_MS).toBe(5000);
+    expect(c.MONGO_MAX_POOL_SIZE).toBe(20);
+    expect(loadConfig({ ...base, MONGO_TIMEOUT_MS: '1500' }).MONGO_TIMEOUT_MS).toBe(1500);
+  });
 });

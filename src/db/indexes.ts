@@ -53,6 +53,7 @@ export const INDEXES: Record<string, IndexDescription[]> = {
     { key: { 'tail.vehicleId': 1, plannedStart: 1 } },
     { key: { 'head.driverId': 1, plannedStart: 1 } },
     { key: { 'tail.driverId': 1, plannedStart: 1 } },
+    { key: { plannedEnd: 1, plannedStart: 1 } },
   ],
 };
 

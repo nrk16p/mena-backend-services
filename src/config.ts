@@ -7,6 +7,8 @@ const EnvSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   MONGO_URI: z.string().min(1),
   MONGO_DB: z.string().min(1),
+  MONGO_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  MONGO_MAX_POOL_SIZE: z.coerce.number().int().positive().default(20),
   JWT_SECRET: z.string().min(32),
   ACCESS_TOKEN_TTL_SEC: z.coerce.number().int().positive().default(3600),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),

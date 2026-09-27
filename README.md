@@ -91,3 +91,10 @@ Flow: create delivery orders (`POST /delivery-orders` or `/delivery-orders/bulk`
 - `GET /status-codes` — the two-level catalogue: `level1` is `working` / `not_working`, `code` is the detail (ATMS codes such as `A`, `A50`, `ล`, `ป`; planning codes such as `PM`, `REPAIR`, `TIRE`, `LEAVE`). Codes named `ATMS … (รอยืนยันความหมาย)` need their meaning confirmed by the PO (admin can rename them).
 - `POST /resource-blocks` — mark a truck or driver unavailable for a period with a status code. Codes with `blocksAssignment: true` stop assignment; `OTHER` only warns.
 - `GET /holidays`, drivers' `weeklyDaysOff` — produce warnings, never block.
+
+## Performance
+
+Every Mongo operation is bounded by `MONGO_TIMEOUT_MS` (default 5000) and the client pool is
+capped by `MONGO_MAX_POOL_SIZE` (default 20), so a slow or runaway query fails fast instead of
+starving the pool. Reporting and analytics queries must not run against the primary (spec §13);
+point them at a secondary or a replica.
