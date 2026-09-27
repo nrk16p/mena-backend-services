@@ -48,4 +48,13 @@ describe('bulk delivery orders', () => {
     const audit = await app.db.collection(C.auditLog).findOne({ entity: 'deliveryOrder', action: 'bulk-create' });
     expect(audit?.after.doNos).toEqual(nos);
   });
+
+  it('creates a large batch (~100 DOs) inside one transaction within the batch timeout budget (spec §13.2)', async () => {
+    const items = Array.from({ length: 100 }, (_, i) => item({ clientRef: `BATCH-${i}` }));
+    const res = await bulk(items, false);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ total: 100, valid: 100, invalid: 0 });
+    expect(res.json().results.filter((r: { ok: boolean }) => r.ok)).toHaveLength(100);
+    expect(await app.db.collection(C.deliveryOrders).countDocuments({ clientRef: { $regex: '^BATCH-' } })).toBe(100);
+  });
 });

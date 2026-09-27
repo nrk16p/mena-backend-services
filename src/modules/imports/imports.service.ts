@@ -1,6 +1,7 @@
 import { ObjectId, type AnyBulkWriteOperation, type ClientSession, type Db, type Document, type MongoClient } from 'mongodb';
 import { AppError, unprocessable } from '../../lib/errors.js';
 import { writeAudit } from '../../lib/audit.js';
+import { withTransaction } from '../../lib/tx.js';
 import { prepareDoc } from '../master/resource.js';
 import type { ParsedRow } from './parse.js';
 import { IMPORT_SPECS, type ImportCtx, type ImportEntity, RowError } from './specs.js';
@@ -66,17 +67,17 @@ export async function applyImportWrites(
   collection: string,
   ops: AnyBulkWriteOperation<Document>[],
   audit: { entity: string; entityId: string; action: string; by: string; after?: unknown },
+  opts?: { timeoutMS?: number },
 ): Promise<void> {
-  const session = mongo.startSession();
-  try {
-    await session.withTransaction(async () => {
+  await withTransaction(
+    mongo,
+    async (session) => {
       const coll = db.collection(collection);
       for (const op of ops) await applyOp(coll, op, session);
       await writeAudit(db, audit, { session });
-    });
-  } finally {
-    await session.endSession();
-  }
+    },
+    opts,
+  );
 }
 
 export async function runImport(
@@ -84,7 +85,7 @@ export async function runImport(
   db: Db,
   entity: ImportEntity,
   rows: ParsedRow[],
-  opts: { dryRun: boolean; by: string },
+  opts: { dryRun: boolean; by: string; batchTimeoutMs?: number },
 ): Promise<ImportReport> {
   const spec = IMPORT_SPECS[entity];
   const coll = db.collection(spec.def.collection);
@@ -162,12 +163,13 @@ export async function runImport(
   if (report.errors > 0) throw unprocessable('IMPORT_HAS_ERRORS', `${report.errors} row(s) have errors; nothing was saved`, report);
   const createdKeys = results.filter((r) => r.action === 'create').map((r) => r.key!);
   const updatedKeys = results.filter((r) => r.action === 'update').map((r) => r.key!);
-  await applyImportWrites(mongo, db, spec.def.collection, ops, {
-    entity: 'import',
-    entityId: entity,
-    action: 'import',
-    by: opts.by,
-    after: { created: createdKeys, updated: updatedKeys },
-  });
+  await applyImportWrites(
+    mongo,
+    db,
+    spec.def.collection,
+    ops,
+    { entity: 'import', entityId: entity, action: 'import', by: opts.by, after: { created: createdKeys, updated: updatedKeys } },
+    { timeoutMS: opts.batchTimeoutMs },
+  );
   return report;
 }

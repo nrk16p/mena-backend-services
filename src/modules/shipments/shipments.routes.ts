@@ -103,7 +103,10 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
       const results: z.infer<typeof BulkShipmentResult>[] = [];
       for (const [index, input] of req.body.items.entries()) {
         try {
-          const { doc, warnings } = await createShipment(app, input, by);
+          // The whole bulk request (up to 100 shipments, each its own transaction) is a batch
+          // job, so each one gets the larger MONGO_BATCH_TIMEOUT_MS budget (spec §13.2), not the
+          // tighter per-request MONGO_TIMEOUT_MS.
+          const { doc, warnings } = await createShipment(app, input, by, { timeoutMS: app.config.MONGO_BATCH_TIMEOUT_MS });
           results.push({ index, ok: true, id: doc._id.toHexString(), shipmentNo: doc.shipmentNo, errors: [], warnings });
         } catch (e) {
           if (!(e instanceof AppError)) throw e;
@@ -137,12 +140,14 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.post('/shipments/:id/plan', { schema: { tags: ['shipments'], params: IdParams, body: Version, response: { 200: ShipmentItem } }, preHandler: write }, async (req) => {
     const existing = await load(req.params.id);
+    const set: Partial<ShipmentDoc> = { status: 'PLANNED' };
     if (existing.status === 'DRAFT') {
       const result = await validateShipment(app.db, draftFromDoc(existing), { shipmentId: existing._id, mode: 'planned' });
       if (result.errors.length > 0) throw invalid(result.errors, result.warnings);
+      set.warnings = result.warnings;
     }
     return shipmentView(
-      await transition(app, existing, { version: req.body.version, from: ['DRAFT'], set: { status: 'PLANNED' }, action: 'plan', by: actorOf(req), notAllowedCode: 'SHIPMENT_NOT_DRAFT' }),
+      await transition(app, existing, { version: req.body.version, from: ['DRAFT'], set, action: 'plan', by: actorOf(req), notAllowedCode: 'SHIPMENT_NOT_DRAFT' }),
     );
   });
 
@@ -156,7 +161,7 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
       await transition(app, existing, {
         version: req.body.version,
         from: ['PLANNED'],
-        set: { status: 'DISPATCHED', dispatch: { at: new Date(), by, version: existing.version + 1 }, driverResponse: null },
+        set: { status: 'DISPATCHED', dispatch: { at: new Date(), by, version: existing.version + 1 }, driverResponse: null, warnings: result.warnings },
         action: 'dispatch',
         by,
         notAllowedCode: 'SHIPMENT_NOT_PLANNED',

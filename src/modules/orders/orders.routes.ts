@@ -151,20 +151,26 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
           updatedAt: now,
         } as DeliveryOrderDoc);
       }
-      await withTransaction(app.mongo, async (session) => {
-        // `insertMany` calls `bulkWrite` internally, which resolves its options twice and
-        // rejects with "An operation cannot be given a timeoutMS setting when inside a
-        // withTransaction call that has a timeoutMS setting" once the client has a `timeoutMS`
-        // (our MONGO_TIMEOUT_MS guardrail) and the write runs inside a convenient
-        // `session.withTransaction()` — see the longer note in imports.service.ts. Insert one
-        // at a time instead; still one atomic transaction, same rollback semantics.
-        for (const doc of docs) await coll().insertOne(doc, { session });
-        await writeAudit(
-          app.db,
-          { entity: 'deliveryOrder', entityId: 'bulk', action: 'bulk-create', by, after: { doNos: docs.map((d) => d.doNo) } },
-          { session },
-        );
-      });
+      await withTransaction(
+        app.mongo,
+        async (session) => {
+          // `insertMany` calls `bulkWrite` internally, which resolves its options twice and
+          // rejects with "An operation cannot be given a timeoutMS setting when inside a
+          // withTransaction call that has a timeoutMS setting" once the client has a `timeoutMS`
+          // (our MONGO_TIMEOUT_MS guardrail) and the write runs inside a convenient
+          // `session.withTransaction()` — see the longer note in imports.service.ts. Insert one
+          // at a time instead; still one atomic transaction, same rollback semantics.
+          for (const doc of docs) await coll().insertOne(doc, { session });
+          await writeAudit(
+            app.db,
+            { entity: 'deliveryOrder', entityId: 'bulk', action: 'bulk-create', by, after: { doNos: docs.map((d) => d.doNo) } },
+            { session },
+          );
+        },
+        // The whole batch (up to 500 DOs) shares this budget instead of the tighter per-request
+        // MONGO_TIMEOUT_MS (spec §13.2).
+        { timeoutMS: app.config.MONGO_BATCH_TIMEOUT_MS },
+      );
       docs.forEach((d, i) => {
         results[i]!.id = d._id.toHexString();
         results[i]!.doNo = d.doNo;

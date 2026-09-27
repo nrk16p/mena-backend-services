@@ -48,4 +48,10 @@ describe('loadConfig', () => {
     expect(c.MONGO_MAX_POOL_SIZE).toBe(20);
     expect(loadConfig({ ...base, MONGO_TIMEOUT_MS: '1500' }).MONGO_TIMEOUT_MS).toBe(1500);
   });
+
+  it('gives batch jobs a separate, larger default timeout budget (spec §13.2)', () => {
+    const c = loadConfig(base);
+    expect(c.MONGO_BATCH_TIMEOUT_MS).toBe(30000);
+    expect(loadConfig({ ...base, MONGO_BATCH_TIMEOUT_MS: '9000' }).MONGO_BATCH_TIMEOUT_MS).toBe(9000);
+  });
 });

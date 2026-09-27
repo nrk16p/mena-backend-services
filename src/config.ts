@@ -8,6 +8,10 @@ const EnvSchema = z.object({
   MONGO_URI: z.string().min(1),
   MONGO_DB: z.string().min(1),
   MONGO_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  // Batch jobs (bulk DO/shipment create, imports) run one `withTransaction` for the whole batch;
+  // the per-request `MONGO_TIMEOUT_MS` budget is too tight for that, so they use this larger
+  // budget instead (spec §13.2: "API queries ... maxTimeMS 1000ms (batch jobs 30000ms)").
+  MONGO_BATCH_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
   MONGO_MAX_POOL_SIZE: z.coerce.number().int().positive().default(20),
   JWT_SECRET: z.string().min(32),
   ACCESS_TOKEN_TTL_SEC: z.coerce.number().int().positive().default(3600),
