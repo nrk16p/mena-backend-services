@@ -26,7 +26,10 @@ describe('API keys', () => {
     const { key, id } = res.json();
     expect(key).toMatch(/^mk_[a-f0-9]{24}_/);
     const list = await app.inject({ method: 'GET', url: '/api/v1/api-keys', headers: admin });
-    expect(JSON.stringify(list.json())).not.toContain(key.split('_')[2]);
+    // The secret can itself contain '_' (it's base64url), so splitting on '_' is unsafe;
+    // anchor on the fixed "mk_<24 hex>_" prefix instead and take everything after it.
+    const secret = /^mk_[a-f0-9]{24}_(.+)$/.exec(key)![1];
+    expect(JSON.stringify(list.json())).not.toContain(secret);
     expect(list.json().items[0]).not.toHaveProperty('keyHash');
     const req = await runScopeGuard(app, 'gps:write', key);
     expect(req.principal).toMatchObject({ kind: 'apiKey', keyId: id, name: 'hino-gps-sync' });
