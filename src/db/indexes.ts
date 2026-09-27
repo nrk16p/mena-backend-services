@@ -42,6 +42,18 @@ export const INDEXES: Record<string, IndexDescription[]> = {
     { key: { 'pickupWindow.from': 1 } },
     { key: { clientId: 1, clientRef: 1 } },
   ],
+  [C.resourceBlocks]: [
+    { key: { resourceType: 1, resourceId: 1, from: 1, to: 1 } },
+    { key: { cancelledAt: 1, from: 1 } },
+  ],
+  [C.shipments]: [
+    { key: { shipmentNo: 1 }, unique: true },
+    { key: { status: 1, plannedStart: 1 } },
+    { key: { 'head.vehicleId': 1, plannedStart: 1 } },
+    { key: { 'tail.vehicleId': 1, plannedStart: 1 } },
+    { key: { 'head.driverId': 1, plannedStart: 1 } },
+    { key: { 'tail.driverId': 1, plannedStart: 1 } },
+  ],
 };
 
 export async function ensureIndexes(db: Db): Promise<void> {
