@@ -25,8 +25,9 @@ export function gpsFlags(i: {
   else {
     if (i.accuracyM !== null && i.accuracyM > LOW_ACCURACY_M) flags.push('LOW_ACCURACY');
     if (i.target) {
-      distanceM = Math.round(haversineM({ lat: i.lat, lng: i.lng }, i.target));
-      if (distanceM > i.target.radiusM) flags.push('OUTSIDE_GEOFENCE');
+      const unroundedDistance = haversineM({ lat: i.lat, lng: i.lng }, i.target);
+      distanceM = Math.round(unroundedDistance);
+      if (unroundedDistance > i.target.radiusM) flags.push('OUTSIDE_GEOFENCE');
     }
   }
   if (i.receivedAt.getTime() - i.deviceTime.getTime() > LATE_SYNC_MS) flags.push('LATE_SYNC');

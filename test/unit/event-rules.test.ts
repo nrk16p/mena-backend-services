@@ -29,6 +29,11 @@ describe('step rules', () => {
     expect(checkStopEvent({ ...drop, allDropsHavePod: true }, 'DEPARTED', true)).toBeNull();
   });
 
+  it('does not require POD when departing a pickup-only stop', () => {
+    const pickup = state({ hasPickups: true, hasDrops: false, done: ['ARRIVED', 'LOAD_START', 'LOAD_END'], allDropsHavePod: false });
+    expect(checkStopEvent(pickup, 'DEPARTED', true)).toBeNull();
+  });
+
   it('allows configured extra steps only while at the stop', () => {
     expect(checkExtraEvent(state({ hasDrops: true }), 'DOCS_SUBMITTED', ['DOCS_SUBMITTED'])?.code).toBe('NOT_AT_STOP');
     expect(checkExtraEvent(state({ hasDrops: true, done: ['ARRIVED'] }), 'DOCS_SUBMITTED', ['DOCS_SUBMITTED'])).toBeNull();

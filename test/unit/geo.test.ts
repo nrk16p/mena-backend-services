@@ -22,6 +22,37 @@ describe('geo', () => {
     expect(gpsFlags({ lat: 13.75, lng: 100.5, accuracyM: 10, deviceTime: t0, receivedAt: t0, target: { lat: 13.75, lng: 100.5, radiusM: 300 } }).flags).toEqual([]);
   });
 
+  it('respects exact boundaries for GPS flags', () => {
+    // accuracyM === 100 should NOT trigger LOW_ACCURACY (boundary is >100)
+    expect(gpsFlags({
+      lat: 13.75, lng: 100.5, accuracyM: 100, deviceTime: t0, receivedAt: t0,
+    }).flags).toEqual([]);
+
+    // receivedAt − deviceTime === exactly 6 hours should NOT trigger LATE_SYNC (boundary is >6 hours)
+    const t0Plus6h = new Date(t0.getTime() + 6 * 3600_000);
+    expect(gpsFlags({
+      lat: 13.75, lng: 100.5, accuracyM: 10, deviceTime: t0, receivedAt: t0Plus6h,
+    }).flags).toEqual([]);
+
+    // Distance equal to radius should NOT trigger OUTSIDE_GEOFENCE
+    const bkk = { lat: 13.7563, lng: 100.5018 };
+    const targetDist = haversineM(bkk, { lat: 13.7663, lng: 100.5018 });
+    const atBoundary = gpsFlags({
+      lat: bkk.lat, lng: bkk.lng, accuracyM: 10, deviceTime: t0, receivedAt: t0,
+      target: { lat: 13.7663, lng: 100.5018, radiusM: targetDist },
+    });
+    expect(atBoundary.flags).toEqual([]);
+    expect(atBoundary.distanceM).toBe(Math.round(targetDist));
+
+    // Distance just beyond radius should trigger OUTSIDE_GEOFENCE
+    const justBeyond = gpsFlags({
+      lat: bkk.lat, lng: bkk.lng, accuracyM: 10, deviceTime: t0, receivedAt: t0,
+      target: { lat: 13.7663, lng: 100.5018, radiusM: targetDist - 0.4 },
+    });
+    expect(justBeyond.flags).toContain('OUTSIDE_GEOFENCE');
+    expect(justBeyond.distanceM).toBe(Math.round(targetDist));
+  });
+
   it('validates GPS payloads', () => {
     const ok = GpsFields.safeParse({ lat: 13.7, lng: 100.5, accuracyM: 8, deviceTime: '2026-10-05T08:00:00+07:00' });
     expect(ok.success).toBe(true);
