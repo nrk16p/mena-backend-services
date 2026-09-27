@@ -20,4 +20,5 @@ export const C = {
   resourceBlocks: 'resourceBlocks',
   deliveryOrders: 'deliveryOrders',
   shipments: 'shipments',
+  events: 'events',
 } as const;

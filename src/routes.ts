@@ -2,6 +2,7 @@ import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { apiKeyRoutes } from './modules/api-keys/api-keys.routes.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
 import { blockRoutes } from './modules/availability/blocks.routes.js';
+import { eventRoutes } from './modules/execution/events.routes.js';
 import { importRoutes } from './modules/imports/imports.routes.js';
 import { masterRoutes } from './modules/master/master.routes.js';
 import { orderRoutes } from './modules/orders/orders.routes.js';
@@ -22,5 +23,6 @@ export const apiRoutes: FastifyPluginAsyncZod = async (api) => {
   await api.register(blockRoutes);
   await api.register(shipmentRoutes);
   await api.register(driverRoutes);
+  await api.register(eventRoutes);
   await api.register(uploadRoutes);
 };

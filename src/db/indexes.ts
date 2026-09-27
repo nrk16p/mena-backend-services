@@ -55,6 +55,7 @@ export const INDEXES: Record<string, IndexDescription[]> = {
     { key: { 'tail.driverId': 1, plannedStart: 1 } },
     { key: { plannedEnd: 1, plannedStart: 1 } },
   ],
+  [C.events]: [{ key: { clientEventId: 1 }, unique: true }, { key: { shipmentId: 1, deviceTime: 1 } }],
 };
 
 export async function ensureIndexes(db: Db): Promise<void> {
