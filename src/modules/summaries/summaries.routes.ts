@@ -53,7 +53,7 @@ export const summaryRoutes: FastifyPluginAsyncZod = async (app) => {
     '/shipments/:id/close',
     {
       schema: {
-        tags: ['shipments'],
+        tags: ['summaries'],
         summary: 'Close a completed shipment and lock its trip summary (ใบสรุปเที่ยว)',
         description:
           'COMPLETED → CLOSED. Callable by admin or planner. Requires every delivery order\'s latest POD to be `verified` (422 `PODS_NOT_VERIFIED`) ' +
@@ -74,7 +74,7 @@ export const summaryRoutes: FastifyPluginAsyncZod = async (app) => {
     '/shipments/:id/summary',
     {
       schema: {
-        tags: ['shipments'],
+        tags: ['summaries'],
         summary: 'Get a shipment\'s trip summary (ใบสรุปเที่ยว)',
         description:
           'Callable by admin, planner or viewer. Returns the evidence locked in at close (POD hashes/outcomes, event count, GPS/timing flags, ' +
@@ -96,7 +96,7 @@ export const summaryRoutes: FastifyPluginAsyncZod = async (app) => {
     '/shipments/:id/summary.pdf',
     {
       schema: {
-        tags: ['shipments'],
+        tags: ['summaries'],
         summary: 'Download the trip summary PDF',
         description:
           'Callable by admin, planner or viewer. Streams the evidence PDF generated at close (`inline`, so browsers preview it). ' +
@@ -122,7 +122,7 @@ export const summaryRoutes: FastifyPluginAsyncZod = async (app) => {
     '/shipments/:id/summary.pdf/regenerate',
     {
       schema: {
-        tags: ['shipments'],
+        tags: ['summaries'],
         summary: 'Regenerate the trip summary PDF',
         description:
           'Callable by admin or planner. Rebuilds the evidence PDF from the trip summary\'s locked-in data, re-verifying each POD\'s hash and stored ' +

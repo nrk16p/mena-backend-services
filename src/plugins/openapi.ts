@@ -23,11 +23,8 @@ const TAGS = [
   { name: 'truckType', description: 'Truck types (ประเภทรถ): rigid (Mixer, Feedmill, Coldchain, Side Curtain) or tractor (Trailer). A vehicle\'s `part` (head/tail/rigid) must match its truck type\'s category.' },
   { name: 'palletMovementType', description: 'Reasons for a pallet movement (ประเภทการเคลื่อนไหวพาเลท), e.g. issue, return, adjustment.' },
   { name: 'location', description: 'Pickup/drop locations (สถานที่) with GPS coordinates and a geofence radius used to validate driver step events.' },
-  {
-    name: 'driver',
-    description:
-      'Two different things share this tag name (a naming collision in the source, not intentional): (1) the phone app\'s own endpoints, only callable by a signed-in **driver** — job list, accept/decline, step events, uploads, POD submission; and (2) `GET/POST/PATCH/DELETE /drivers`, the **staff-only master-data CRUD** for driver profiles (name, phone, license, days off). Check each operation\'s path and required role to tell them apart: `/driver/...` and `/uploads/...` are the phone app; plain `/drivers` is master data.',
-  },
+  { name: 'driver-profile', description: 'Driver master data (พนักงานขับรถ) — staff-only CRUD for driver profiles: name, phone, licence expiry, weekly days off. Linking a login to a driver is done on `/users`.' },
+  { name: 'driver', description: 'The driver phone app\'s own endpoints, callable only by a signed-in **driver** (role `driver` with a linked driver profile): job list, accept/decline, step events with GPS, photo upload links, POD submission, own timeline and pallet movements. Other drivers\' shipments return 404.' },
   { name: 'vehicle', description: 'Trucks (รถ): head/tail/rigid parts, each linked to a truck type. Plates are matched loosely (case, spaces, dashes ignored) to catch duplicates.' },
   { name: 'jobGroup', description: 'Job groups (กลุ่มงาน) — per-client rules that auto-classify delivery orders for planning and reporting; `/clients/:clientId/job-groups/match` previews which group a set of fields would match.' },
   { name: 'statusCode', description: 'Reasons a truck or driver is unavailable: `level1` is `working`/`not_working`, `code` is the detail (ATMS codes like `A`, `A50`; planning codes like `PM`, `REPAIR`, `TIRE`, `LEAVE`).' },
@@ -39,8 +36,9 @@ const TAGS = [
   {
     name: 'shipments',
     description:
-      'Shipments (เที่ยว) — validate, create, plan, dispatch, cancel, the staff-side timeline, and (same tag — no distinct tag exists for these yet) closing a trip and reading back its evidence: `/shipments/:id/close`, `/summary`, `/summary.pdf`, `/summary.pdf/regenerate`.',
+      'Shipments (เที่ยว) — validate, create, plan, dispatch, cancel, and the staff-side timeline.',
   },
+  { name: 'summaries', description: 'Close a completed shipment into a locked trip summary (ใบสรุปเที่ยว) and read its evidence: `/shipments/:id/close`, `/summary`, `/summary.pdf`, `/summary.pdf/regenerate`.' },
   { name: 'pallets', description: 'Pallet movements against a shipment\'s tail vehicle and the running per-vehicle balance; staff can also record a manual correction.' },
   { name: 'pods', description: 'Proof of delivery (POD) review for staff: list, inspect (with presigned file links), verify or reject a submitted POD.' },
   { name: 'system', description: 'Health check.' },
@@ -52,13 +50,14 @@ const X_TAG_GROUPS = [
     name: 'Master data',
     tags: [
       'client', 'zone', 'material', 'serviceType', 'truckType', 'palletMovementType',
-      'location', 'vehicle', 'jobGroup', 'statusCode', 'holiday', 'pod-templates', 'imports',
+      'location', 'vehicle', 'driver-profile', 'jobGroup', 'statusCode', 'holiday', 'pod-templates', 'imports',
     ],
   },
   { name: 'Planning', tags: ['delivery-orders', 'availability', 'shipments'] },
   { name: 'Driver app', tags: ['driver'] },
   { name: 'Proof of delivery', tags: ['pods'] },
   { name: 'Pallets', tags: ['pallets'] },
+  { name: 'Close & evidence', tags: ['summaries'] },
   { name: 'System', tags: ['system'] },
 ];
 

@@ -61,6 +61,7 @@ const DriverBody = z.object({
 
 export const driversDef: ResourceDef = {
   name: 'driver',
+  tag: 'driver-profile',
   path: '/drivers',
   collection: C.drivers,
   body: DriverBody,

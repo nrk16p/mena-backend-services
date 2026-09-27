@@ -26,6 +26,8 @@ type Obj = Record<string, unknown>;
 
 export interface ResourceDef {
   name: string;
+  /** OpenAPI tag for the generated routes; defaults to `name`. */
+  tag?: string;
   path: string;
   collection: string;
   body: z.ZodObject<z.ZodRawShape>;
@@ -171,7 +173,7 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
 
     app.get(
       def.path,
-      { schema: { tags: [def.name], summary: docs.list.summary, description: docs.list.description, params: parentParams, querystring: listQuery, response: { 200: pageResponse(itemSchema) } }, preHandler: readGuard },
+      { schema: { tags: [def.tag ?? def.name], summary: docs.list.summary, description: docs.list.description, params: parentParams, querystring: listQuery, response: { 200: pageResponse(itemSchema) } }, preHandler: readGuard },
       async (req) => {
       const q = req.query as Obj & { limit: number; cursor?: string; q?: string; active: string };
       const filter: Document = { ...(await parentFilter(req.params as Obj)) };
@@ -192,7 +194,7 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
 
     app.get(
       `${def.path}/:id`,
-      { schema: { tags: [def.name], summary: docs.get.summary, description: docs.get.description, params: idParams, response: { 200: itemSchema } }, preHandler: readGuard },
+      { schema: { tags: [def.tag ?? def.name], summary: docs.get.summary, description: docs.get.description, params: idParams, response: { 200: itemSchema } }, preHandler: readGuard },
       async (req) => {
         const params = req.params as Obj & { id: string };
         const doc = await coll().findOne({ _id: new ObjectId(params.id), ...(await parentFilter(params)) });
@@ -203,7 +205,7 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
 
     app.post(
       def.path,
-      { schema: { tags: [def.name], summary: docs.create.summary, description: docs.create.description, params: parentParams, body: def.body, response: { 201: itemSchema } }, preHandler: writeGuard },
+      { schema: { tags: [def.tag ?? def.name], summary: docs.create.summary, description: docs.create.description, params: parentParams, body: def.body, response: { 201: itemSchema } }, preHandler: writeGuard },
       async (req, reply) => {
       const pf = await parentFilter(req.params as Obj);
       const prepared = await prepareDoc(def, app.db, req.body as Obj, null, pf);
@@ -221,7 +223,7 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
 
     app.patch(
       `${def.path}/:id`,
-      { schema: { tags: [def.name], summary: docs.update.summary, description: docs.update.description, params: idParams, body: patchBody, response: { 200: itemSchema } }, preHandler: writeGuard },
+      { schema: { tags: [def.tag ?? def.name], summary: docs.update.summary, description: docs.update.description, params: idParams, body: patchBody, response: { 200: itemSchema } }, preHandler: writeGuard },
       async (req) => {
       const params = req.params as Obj & { id: string };
       const pf = await parentFilter(params);
@@ -244,7 +246,7 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
 
     app.delete(
       `${def.path}/:id`,
-      { schema: { tags: [def.name], summary: docs.deactivate.summary, description: docs.deactivate.description, params: idParams, response: { 200: itemSchema } }, preHandler: writeGuard },
+      { schema: { tags: [def.tag ?? def.name], summary: docs.deactivate.summary, description: docs.deactivate.description, params: idParams, response: { 200: itemSchema } }, preHandler: writeGuard },
       async (req) => {
         const params = req.params as Obj & { id: string };
         const pf = await parentFilter(params);
