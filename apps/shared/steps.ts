@@ -10,4 +10,13 @@ export const STEP_TH: Record<string, string> = {
   ARRIVED: 'ถึงจุดแล้ว', UNLOAD_START: 'เริ่มลงสินค้า', UNLOAD_END: 'ลงสินค้าเสร็จ', LOAD_START: 'เริ่มขึ้นสินค้า',
   LOAD_END: 'ขึ้นสินค้าเสร็จ', DEPARTED: 'ออกจากจุด', DOCS_SUBMITTED: 'ยื่นเอกสาร', DOCS_RETURNED: 'รับเอกสารคืน',
   SEAL_CHECKED: 'ตรวจซีล', TEMP_CHECKED: 'ตรวจอุณหภูมิ',
+  DELAYED: 'ล่าช้า', BREAKDOWN: 'รถเสีย', EXCEPTION: 'เหตุอื่น',
 };
+
+/** Thai label for an event/step code; unknown codes show as-is. */
+export const stepLabel = (code: string): string => STEP_TH[code] ?? code;
+
+export const STOP_STATUS_TH: Record<string, string> = { PENDING: 'รอ', ARRIVED: 'ถึงแล้ว', WORKING: 'กำลังทำงาน', DONE: 'เสร็จ' };
+
+/** Thai label for a stop status; unknown statuses show as-is. */
+export const stopStatusLabel = (status: string): string => STOP_STATUS_TH[status] ?? status;

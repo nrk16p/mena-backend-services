@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError, apiFetch, openAuthedFile } from '@shared/api';
 import { describeError } from '@shared/errors';
+import { stepLabel, stopStatusLabel } from '@shared/steps';
 import { fmtBkk } from '@shared/time';
 import type { EventItem, Shipment, ShipmentStatus } from '@shared/types';
 import IssueList from '../components/IssueList';
@@ -149,7 +150,7 @@ export default function ShipmentDetailPage() {
                       {st.dropDoIds.length > 0 && `ส่ง ${st.dropDoIds.map((d) => doNo.get(d)).join(', ')}`}
                     </span>
                   </span>
-                  <span className="text-xs">{st.status}</span>
+                  <span className="text-xs">{stopStatusLabel(st.status)}</span>
                 </li>
               ))}
             </ol>
@@ -179,7 +180,7 @@ export default function ShipmentDetailPage() {
               {(events.data ?? []).map((e) => (
                 <li key={e.id} className="flex justify-between">
                   <span>
-                    {e.code}
+                    {stepLabel(e.code)}
                     {e.reasonCode ? ` (${e.reasonCode})` : ''}
                     {e.flags.length > 0 && <span className="ml-2 text-xs text-amber-700">{e.flags.join(', ')}</span>}
                   </span>

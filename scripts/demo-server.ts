@@ -60,6 +60,9 @@ Object.assign(process.env, {
   DEMO_PASSWORD: s.demoPassword,
   STORAGE_DRIVER: process.env.STORAGE_DRIVER ?? 'memory',
   PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL ?? `https://${ip}:5174`,
+  // Loopback only: phones reach the API through the driver app's Vite https proxy, never directly,
+  // so the demo API (with its well-known demo accounts) isn't exposed on the LAN.
+  HOST: process.env.HOST ?? '127.0.0.1',
 });
 
 // Seed (idempotent — never resets data a demo user is in the middle of).
