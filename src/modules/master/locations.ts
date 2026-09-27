@@ -42,4 +42,11 @@ export const locationsDef: ResourceDef = {
     const { geo, ...rest } = doc as { geo?: { coordinates: [number, number] } } & Record<string, unknown>;
     return geo ? { ...rest, lat: geo.coordinates[1], lng: geo.coordinates[0] } : rest;
   },
+  validate: async (merged, { db, existing }) => {
+    if (!existing || existing.isSite !== true || merged.isSite !== false) return;
+    const used = await db.collection(C.jobGroups).countDocuments({ 'criteria.siteIds': existing._id }, { limit: 1 });
+    if (used > 0) {
+      throw unprocessable('LOCATION_USED_AS_SITE', 'This location is a site in a job group; remove it from the job group first');
+    }
+  },
 };

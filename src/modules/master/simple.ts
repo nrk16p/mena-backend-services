@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { C } from '../../db/collections.js';
+import { unprocessable } from '../../lib/errors.js';
 import type { ResourceDef } from './resource.js';
 
 export const Code = z.string().trim().min(1).max(40);
@@ -33,6 +34,13 @@ const truckType = codeName.extend({ category: z.enum(TRUCK_CATEGORIES) });
 export const truckTypesDef: ResourceDef = {
   name: 'truckType', path: '/truck-types', collection: C.truckTypes,
   body: truckType, item: truckType, searchFields: ['code', 'name'], filterFields: [{ name: 'category' }],
+  validate: async (merged, { db, existing }) => {
+    if (!existing || existing.category === merged.category) return;
+    const inUse = await db.collection(C.vehicles).countDocuments({ truckTypeId: existing._id }, { limit: 1 });
+    if (inUse > 0) {
+      throw unprocessable('TRUCK_TYPE_IN_USE', 'The category cannot change while vehicles use this truck type');
+    }
+  },
 };
 
 const palletMovementType = codeName.extend({ sign: z.union([z.literal(-1), z.literal(0), z.literal(1)]) });

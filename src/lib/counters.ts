@@ -13,6 +13,8 @@ export function bangkokYYMM(d: Date): string {
 
 export type CounterPrefix = 'SH' | 'DO';
 
+// Past 99 999 numbers in one prefix-month the sequence simply widens to six digits
+// (e.g. SH-2610-100000). Numbers stay unique; sort them numerically, not as strings.
 export async function nextNumber(db: Db, prefix: CounterPrefix, now: Date = new Date()): Promise<string> {
   const key = `${prefix}-${bangkokYYMM(now)}`;
   const doc = await db

@@ -21,6 +21,11 @@ export interface MatchableGroup {
   criteria: JobGroupCriteria;
 }
 
+/**
+ * `candidates`: for `auto`, every group that matched (the winner included); for `ambiguous`,
+ * only the groups tied at the highest specificity (the planner chooses one of them); for
+ * `none`, empty. Delivery orders persist this array as `jobGroupMatch.candidates`.
+ */
 export type MatchResult =
   | { status: 'auto'; jobGroupId: string; candidates: string[] }
   | { status: 'ambiguous'; jobGroupId: null; candidates: string[] }
