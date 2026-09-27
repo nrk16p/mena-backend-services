@@ -53,8 +53,8 @@ describe('seed', () => {
   });
 
   it('seeds demo data idempotently and it matches a job group', async () => {
-    await seedDemo(db);
-    await seedDemo(db);
+    await seedDemo(db, { password: 'Demo-pass-1' });
+    await seedDemo(db, { password: 'Demo-pass-1' });
     expect(await db.collection(C.clients).countDocuments({ code: 'DEMO' })).toBe(1);
     const client = await db.collection(C.clients).findOne({ code: 'DEMO' });
     const byCode = async (coll: string, code: string) => (await db.collection(coll).findOne({ code }))!._id as ObjectId;
@@ -67,5 +67,38 @@ describe('seed', () => {
     });
     expect(result.status).toBe('auto');
     expect(await db.collection(C.podTemplates).countDocuments({ clientId: client!._id, status: 'published' })).toBe(1);
+  });
+
+  it('seeds demo users, fleet and unassigned DOs idempotently', async () => {
+    await seedDemo(db, { password: 'Demo-pass-1' });
+    await seedDemo(db, { password: 'Demo-pass-1' });
+    for (const u of ['demo-admin', 'demo-planner', 'demo-driver1', 'demo-driver2']) {
+      const user = await findUserByUsername(db, u);
+      expect(user).not.toBeNull();
+      expect(await verifyPassword(user!.passwordHash, 'Demo-pass-1')).toBe(true);
+    }
+    expect((await findUserByUsername(db, 'demo-driver1'))!.driverId).not.toBeNull();
+    expect(await db.collection(C.vehicles).countDocuments({ plate: { $in: ['70-1001', '70-1002', '71-2001', '71-2002', '80-3001', '80-3002'] } })).toBe(6);
+    expect(await db.collection(C.deliveryOrders).countDocuments({ status: 'UNASSIGNED' })).toBe(3);
+  });
+
+  it("puts a shipment on demo-driver1's phone, already dispatched and ready", async () => {
+    await seedDemo(db, { password: 'Demo-pass-1' });
+    await seedDemo(db, { password: 'Demo-pass-1' });
+    const driver1 = await findUserByUsername(db, 'demo-driver1');
+    const shipment = await db.collection(C.shipments).findOne({ 'head.driverId': driver1!.driverId, status: 'DISPATCHED' });
+    expect(shipment).not.toBeNull();
+    // Visible to the driver app the same way `GET /driver/shipments` finds it.
+    const driverVisible = await db.collection(C.shipments).findOne({
+      _id: shipment!._id,
+      status: { $in: ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT', 'COMPLETED'] },
+      $or: [{ 'head.driverId': driver1!.driverId }, { 'tail.driverId': driver1!.driverId }],
+    });
+    expect(driverVisible).not.toBeNull();
+    const linkedDo = await db.collection(C.deliveryOrders).findOne({ clientRef: 'DEMO-4' });
+    expect(linkedDo!.shipmentId).toEqual(shipment!._id);
+    expect(linkedDo!.status).toBe('PLANNED');
+    // Only one dispatched demo shipment even after a second seed run.
+    expect(await db.collection(C.shipments).countDocuments({ note: 'Demo shipment — ready for demo-driver1' })).toBe(1);
   });
 });
