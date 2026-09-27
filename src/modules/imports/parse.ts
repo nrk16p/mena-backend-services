@@ -21,6 +21,12 @@ function cellText(v: ExcelJS.CellValue): string {
 export async function parseTable(buf: Buffer, filename: string): Promise<ParsedRow[]> {
   const name = filename.toLowerCase();
   if (name.endsWith('.csv')) {
+    // A file saved in a legacy Thai codepage (Windows-874/TIS-620) decodes as UTF-8
+    // into U+FFFD replacement characters wherever the byte sequence is invalid; catch
+    // that up front with a clear message instead of silently mangling the text.
+    if (buf.toString('utf8').includes('�')) {
+      throw badRequest('CSV_NOT_UTF8', 'Save the file as "CSV UTF-8" or .xlsx');
+    }
     const records = parse(buf, {
       columns: (header: string[]) => header.map(normHeader),
       skip_empty_lines: true,

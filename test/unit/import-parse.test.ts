@@ -23,4 +23,13 @@ describe('parseTable', () => {
   it('rejects other file types', async () => {
     await expect(parseTable(Buffer.from('x'), 'x.txt')).rejects.toMatchObject({ code: 'UNSUPPORTED_FILE' });
   });
+
+  it('rejects a CSV that is not valid UTF-8 (e.g. saved as Windows-874/TIS-620)', async () => {
+    // "code,name\nBKK,<TIS-620 bytes for Thai text>\n" — those bytes are not a valid
+    // UTF-8 sequence, so a naive utf8 decode surfaces U+FFFD replacement characters.
+    const bytes = Buffer.from([
+      0x63, 0x6f, 0x64, 0x65, 0x2c, 0x6e, 0x61, 0x6d, 0x65, 0x0a, 0x42, 0x4b, 0x4b, 0x2c, 0xa1, 0xc3, 0xd8, 0xa7, 0x0a,
+    ]);
+    await expect(parseTable(bytes, 'bad-encoding.csv')).rejects.toMatchObject({ code: 'CSV_NOT_UTF8' });
+  });
 });
