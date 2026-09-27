@@ -48,6 +48,10 @@ export interface ShipmentDoc {
   driverResponse: { status: 'ACCEPTED' | 'DECLINED'; reason: string | null; at: Date; by: string } | null;
   cancelledAt: Date | null;
   cancelReason: string | null;
+  // Optional so existing creators (pre-dating POD close/summary) still compile.
+  closedAt?: Date | null;
+  closedBy?: string | null;
+  summaryId?: ObjectId | null;
   createdBy: string;
   createdAt: Date;
   updatedBy: string;

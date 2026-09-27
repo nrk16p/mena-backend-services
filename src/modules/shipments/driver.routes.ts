@@ -7,13 +7,20 @@ import { IdParams } from '../../lib/ids.js';
 import { toApi } from '../../lib/serialize.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import { DoItem } from '../orders/orders.schemas.js';
+import { podFormsFor } from '../pods/pod-form.js';
 import { driverIdOf, driverScope, loadDriverShipment } from './driver-access.js';
 import { ShipmentItem } from './shipment.schemas.js';
 import { doIdsOf, shipmentView, transition } from './shipment.service.js';
 import type { ShipmentDoc } from './shipment.types.js';
 
 const LocationLite = z.object({ id: z.string(), code: z.string(), name: z.string(), lat: z.number(), lng: z.number(), geofenceRadiusM: z.number() });
-const DriverShipment = ShipmentItem.extend({ deliveryOrders: z.array(DoItem), locations: z.array(LocationLite) });
+const PodFormOut = z.object({
+  templateId: z.string().nullable(),
+  version: z.number(),
+  extraSteps: z.array(z.string()),
+  fields: z.array(z.object({ key: z.string(), label: z.string(), type: z.string(), required: z.boolean(), min: z.number().optional(), max: z.number().optional(), unit: z.string().optional(), options: z.array(z.string()).optional() })),
+});
+const DriverShipment = ShipmentItem.extend({ deliveryOrders: z.array(DoItem.extend({ podForm: PodFormOut })), locations: z.array(LocationLite) });
 
 export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
   const driverOnly = app.requireRoles('driver');
@@ -21,8 +28,9 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get('/driver/shipments', { schema: { tags: ['driver'], response: { 200: z.object({ items: z.array(DriverShipment) }) } }, preHandler: driverOnly }, async (req) => {
     const driverId = driverIdOf(req);
+    // COMPLETED stays listed until the shipment is CLOSED so the driver can resubmit a rejected POD (P3-R4).
     const docs = await coll()
-      .find({ status: { $in: ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT'] }, ...driverScope(driverId) })
+      .find({ status: { $in: ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT', 'COMPLETED'] }, ...driverScope(driverId) })
       .sort({ plannedStart: 1 })
       .limit(50)
       .toArray();
@@ -32,11 +40,15 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
       app.db.collection<DeliveryOrderDoc>(C.deliveryOrders).find({ _id: { $in: allDoIds } }).toArray(),
       app.db.collection(C.locations).find({ _id: { $in: allLocIds } }).toArray(),
     ]);
+    const forms = await podFormsFor(app.db, dos);
     const doById = new Map(dos.map((d) => [d._id.toHexString(), d]));
     const locById = new Map(locs.map((l) => [l._id.toHexString(), l]));
     const items = docs.map((doc) => ({
       ...shipmentView(doc),
-      deliveryOrders: doIdsOf(doc.stops).map((id) => doById.get(id.toHexString())).filter((d): d is DeliveryOrderDoc => !!d).map(toApi),
+      deliveryOrders: doIdsOf(doc.stops)
+        .map((id) => doById.get(id.toHexString()))
+        .filter((d): d is DeliveryOrderDoc => !!d)
+        .map((d) => ({ ...toApi(d), podForm: toApi(forms.get(d._id.toHexString())!) })),
       locations: [...new Set(doc.stops.map((s) => s.locationId.toHexString()))]
         .map((id) => locById.get(id))
         .filter((l): l is NonNullable<typeof l> => !!l)
