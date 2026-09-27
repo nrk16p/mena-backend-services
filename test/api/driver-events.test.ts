@@ -125,4 +125,45 @@ describe('driver events', () => {
     expect((await app.inject({ method: 'GET', url, headers: f.driver2 })).statusCode).toBe(404);
     expect((await app.inject({ method: 'GET', url, headers: f.viewer })).statusCode).toBe(403);
   });
+
+  it('hides the driver own-shipment timeline for a shipment not in a driver-visible status (P3-R13.5)', async () => {
+    const { shipment } = await acceptedShipment(app, f, { day: '2026-10-17' });
+    await app.db.collection(C.shipments).updateOne({ shipmentNo: shipment.shipmentNo }, { $set: { status: 'CLOSED' } });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/driver/shipments/${shipment.id}/events`, headers: f.driver1 });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('flags a reused clientEventId with a different code or shipment as CLIENT_EVENT_ID_REUSED, not a duplicate (P3-R13.1)', async () => {
+    const { shipment: shipmentA } = await acceptedShipment(app, f, { day: '2026-10-18' });
+    const { shipment: shipmentB } = await acceptedShipment(app, f, { day: '2026-10-19' });
+    const clientEventId = randomUUID();
+    const first = await tap(app, f, shipmentA, null, 'DELAYED', { clientEventId, reasonCode: 'TRAFFIC' });
+    expect(first.status).toBe('accepted');
+    // Same clientEventId, different code, same shipment.
+    const diffCode = await tap(app, f, shipmentA, null, 'BREAKDOWN', { clientEventId });
+    expect(diffCode).toMatchObject({ status: 'rejected', code: 'CLIENT_EVENT_ID_REUSED' });
+    // Same clientEventId and code, different shipment.
+    const diffShipment = await tap(app, f, shipmentB, null, 'DELAYED', { clientEventId, reasonCode: 'TRAFFIC' });
+    expect(diffShipment).toMatchObject({ status: 'rejected', code: 'CLIENT_EVENT_ID_REUSED' });
+    // The exact same request replays as a duplicate, not a rejection.
+    const replay = await tap(app, f, shipmentA, null, 'DELAYED', { clientEventId, reasonCode: 'TRAFFIC' });
+    expect(replay).toMatchObject({ status: 'duplicate', eventId: first.eventId });
+    expect(await app.db.collection(C.events).countDocuments({ clientEventId })).toBe(1);
+  });
+
+  it('flags a reused clientEventId as CLIENT_EVENT_ID_REUSED when it loses a concurrent race with a different code (P3-R13.1)', async () => {
+    const { shipment } = await acceptedShipment(app, f, { day: '2026-10-20' });
+    const clientEventId = randomUUID();
+    const send = (code: string, reasonCode: string | null) =>
+      app.inject({
+        method: 'POST', url: '/api/v1/driver/events', headers: f.driver1,
+        payload: { events: [{ clientEventId, shipmentId: shipment.id, stopId: null, code, reasonCode, ...gps() }] },
+      });
+    const results = (await Promise.all([send('DELAYED', 'TRAFFIC'), send('BREAKDOWN', null)])).map((r) => ok(r).results[0] as { status: string; code?: string });
+    expect(results.filter((r) => r.status === 'accepted')).toHaveLength(1);
+    const losers = results.filter((r) => r.status !== 'accepted');
+    expect(losers).toHaveLength(1);
+    expect(losers[0]).toMatchObject({ status: 'rejected', code: 'CLIENT_EVENT_ID_REUSED' });
+    expect(await app.db.collection(C.events).countDocuments({ clientEventId })).toBe(1);
+  });
 });

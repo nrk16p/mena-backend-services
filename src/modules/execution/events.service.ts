@@ -64,12 +64,22 @@ export interface EventResult {
 /** Driver events are accepted from acceptance until close; COMPLETED allows the last DEPARTED (P3-R4, spec §5.3). */
 export const EVENT_ACTIVE_STATUSES: ShipmentStatus[] = ['ACCEPTED', 'IN_TRANSIT', 'COMPLETED'];
 
+/** A stored event under this clientEventId that doesn't match the request is a reuse, not a replay (P3-R13.1). */
+function clientEventIdReused(existing: EventDoc, by: string, input: EventInputT): boolean {
+  return existing.by !== by || existing.shipmentId.toHexString() !== input.shipmentId || existing.code !== input.code;
+}
+
 export async function recordDriverEvent(app: FastifyInstance, by: string, driverId: ObjectId, input: EventInputT): Promise<EventResult> {
   const base = { clientEventId: input.clientEventId, flags: [] as string[] };
   const events = app.db.collection<EventDoc>(C.events);
   const orders = app.db.collection<DeliveryOrderDoc>(C.deliveryOrders);
   const existing = await events.findOne({ clientEventId: input.clientEventId });
-  if (existing) return { ...base, status: 'duplicate', eventId: existing._id.toHexString(), flags: existing.flags };
+  if (existing) {
+    if (clientEventIdReused(existing, by, input)) {
+      return { ...base, status: 'rejected', eventId: null, code: 'CLIENT_EVENT_ID_REUSED', message: 'This clientEventId was already used for a different event' };
+    }
+    return { ...base, status: 'duplicate', eventId: existing._id.toHexString(), flags: existing.flags };
+  }
   try {
     const shipment = await loadDriverShipment(app.db, new ObjectId(input.shipmentId), driverId);
     if (!EVENT_ACTIVE_STATUSES.includes(shipment.status)) {
@@ -166,7 +176,12 @@ export async function recordDriverEvent(app: FastifyInstance, by: string, driver
     // then this attempt fails the unique index, the step check (EVENT_ALREADY_RECORDED) or the version
     // guard (SHIPMENT_CHANGED). Either way the event is stored, so the replay is a duplicate, not a rejection.
     const dup = await events.findOne({ clientEventId: input.clientEventId });
-    if (dup) return { ...base, status: 'duplicate', eventId: dup._id.toHexString(), flags: dup.flags };
+    if (dup) {
+      if (clientEventIdReused(dup, by, input)) {
+        return { ...base, status: 'rejected', eventId: null, code: 'CLIENT_EVENT_ID_REUSED', message: 'This clientEventId was already used for a different event' };
+      }
+      return { ...base, status: 'duplicate', eventId: dup._id.toHexString(), flags: dup.flags };
+    }
     if (e instanceof AppError) return { ...base, status: 'rejected', eventId: null, code: e.code, message: e.message };
     throw e;
   }
