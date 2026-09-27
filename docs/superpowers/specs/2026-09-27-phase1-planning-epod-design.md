@@ -399,3 +399,51 @@ Cutover: (1) new API runs in parallel; (2) GPS sync repos switch URL + add API k
 - Separate Mongo cluster vs separate database on existing cluster — decide at provisioning (cost vs isolation).
 - Coldchain continuous temperature logging during transit (sensor feed) — later phase; Phase 1 captures temperature at POD via template.
 - Mixer high-frequency round trips — `POST /shipments/bulk` covers creation; a dedicated "repeat trip" planning UX is a frontend concern.
+
+---
+
+## 13. Data & performance design (added 2026-09-27)
+
+Target scale: **1,000 trucks**, ~1,500 drivers, ~3,000 locations, 3–6 trips per truck per day.
+
+### 13.1 Expected volume
+
+| Collection | Growth | Per year | Pattern |
+|---|---|---|---|
+| `shipments` | 3–6k/day | ~1–2M | hot while active, cold after close |
+| `deliveryOrders` | 3–8k/day | ~1–3M | same |
+| `events` | ~8 per stop, 50–100k/day | ~20–35M | append-only |
+| `pods` | ~1 per DO | ~1–3M | append-only; files in Spaces |
+| `vehiclePositions` | 1,000 docs overwritten | 1,000 | hot, tiny |
+| GPS history | 144k/day at 10-min cadence | ~50M | time-series collection |
+| `auditLog` | ~1 per write | ~10–20M | append-only |
+
+Write load is light (< 50 writes/s even with 30-second GPS); latency is governed by read patterns.
+
+### 13.2 Rules
+
+1. **Dedicated cluster** (not the analytics cluster): 3-node replica set, start at 4 GB RAM; the working set (active shipments/DOs, recent events, master data) must fit in memory.
+2. **Bounded documents:** shipments hold ≤ 50 stops; events, PODs, pallet movements and audit entries are separate append-only collections, never growing arrays; files live in Spaces (only keys + SHA-256 in MongoDB).
+3. **Types:** all timestamps are BSON `Date`, all references `ObjectId`; no date strings.
+4. **Every query is indexed and bounded:** each hot query has a supporting index (13.3); API queries run with `maxTimeMS` 1 000 ms (batch jobs 30 000 ms); every list is paginated; no request may scan a whole collection.
+5. **No reporting on the primary during operations:** monthly reports read month-close snapshots; BI reads a nightly copy or a secondary with `readPreference: secondaryPreferred`.
+6. **GPS history** is a MongoDB time-series collection (`metaField: vehicleId`, `timeField: at`, granularity minutes) with `expireAfterSeconds` ≈ 13 months; only the latest position per truck is in `vehiclePositions`.
+7. **Retention/archival:** `auditLog` TTL 2 years (confirm with finance); shipments/DOs/events/PODs of shipments closed more than 13 months ago move to `*_archive` collections by a nightly job.
+8. **Driver/planning endpoints avoid N+1 reads:** related documents are fetched with one `$in` query per collection per request.
+9. **Connection pool:** `maxPoolSize` 20 per API instance.
+
+### 13.3 Hot queries and indexes
+
+| Query | Index |
+|---|---|
+| Double booking (vehicle/driver × window) | `shipments {head.vehicleId, plannedStart}`, `{tail.vehicleId, plannedStart}`, `{head.driverId, plannedStart}`, `{tail.driverId, plannedStart}` |
+| Planning board / availability window | `shipments {status, plannedStart}`, `{plannedEnd, plannedStart}` |
+| DO pool | `deliveryOrders {status, clientId}`, `{pickupWindow.from}` |
+| Resource blocks in a window | `resourceBlocks {resourceType, resourceId, from, to}`, `{cancelledAt, from}` |
+| Shipment timeline | `events {shipmentId, deviceTime}`, unique `{clientEventId}` |
+| POD review queue | `pods {status, receivedAt}`, unique `{clientPodId}` |
+| Latest GPS / geofence | `vehiclePositions {plate}` unique, `locations {geo: 2dsphere}` |
+
+### 13.4 Verification
+
+A load test (Plan 4) seeds 1,000 trucks, 1,500 drivers, 3,000 locations and one year of history (~1.5M shipments, ~25M events), then runs planning, driver taps and GPS pushes concurrently. Targets: p95 < 150 ms for planning endpoints, < 50 ms for driver taps and GPS ingest. A test fails the build if any hot query's `explain()` shows `COLLSCAN`.

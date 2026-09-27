@@ -3682,6 +3682,125 @@ Claude-Session: https://claude.ai/code/session_01U9JUaE2pxXmH3GFPZLKEr6"
 
 ---
 
+### Task 13: Performance guardrails (spec §13)
+
+**Files:**
+- Modify: `src/config.ts`, `src/plugins/mongo.ts`, `src/db/indexes.ts`, `src/modules/shipments/driver.routes.ts`, `.env.example`, `README.md`
+- Test: `test/unit/config.test.ts`, `test/api/performance-guardrails.test.ts`
+
+**Interfaces:**
+- Produces: config `MONGO_TIMEOUT_MS` (default 5000) and `MONGO_MAX_POOL_SIZE` (default 20) passed to `new MongoClient(uri, { timeoutMS, maxPoolSize })`; index `shipments {plannedEnd: 1, plannedStart: 1}`; `GET /driver/shipments` loads DOs and locations for all returned shipments with one `$in` query per collection (no per-shipment queries).
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/unit/config.test.ts` inside the `describe`:
+```ts
+  it('bounds Mongo operations and pool size by default', () => {
+    const c = loadConfig(base);
+    expect(c.MONGO_TIMEOUT_MS).toBe(5000);
+    expect(c.MONGO_MAX_POOL_SIZE).toBe(20);
+    expect(loadConfig({ ...base, MONGO_TIMEOUT_MS: '1500' }).MONGO_TIMEOUT_MS).toBe(1500);
+  });
+```
+
+`test/api/performance-guardrails.test.ts`:
+```ts
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { App } from '../../src/app.js';
+import { C } from '../../src/db/collections.js';
+import { buildTestApp, closeTestApp } from '../helpers/app.js';
+
+describe('performance guardrails', () => {
+  let app: App;
+  beforeAll(async () => {
+    app = await buildTestApp();
+  });
+  afterAll(async () => closeTestApp(app));
+
+  it('passes the operation timeout and pool size to the Mongo client', () => {
+    expect(app.mongo.options.timeoutMS).toBe(5000);
+    expect(app.mongo.options.maxPoolSize).toBe(20);
+  });
+
+  it('has an index for window queries on shipments', async () => {
+    const names = (await app.db.collection(C.shipments).indexes()).map((i) => JSON.stringify(i.key));
+    expect(names).toContain(JSON.stringify({ plannedEnd: 1, plannedStart: 1 }));
+  });
+
+  it('answers the availability window query without a collection scan', async () => {
+    const plan = await app.db
+      .collection(C.shipments)
+      .find({ status: { $in: ['PLANNED'] }, plannedStart: { $lt: new Date('2026-10-02') }, plannedEnd: { $gt: new Date('2026-10-01') } })
+      .explain('queryPlanner');
+    expect(JSON.stringify(plan.queryPlanner.winningPlan)).not.toContain('COLLSCAN');
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `npx vitest run test/unit/config.test.ts test/api/performance-guardrails.test.ts`
+Expected: FAIL — config fields missing, index missing.
+
+- [ ] **Step 3: Implement**
+
+`src/config.ts` — add to `EnvSchema`:
+```ts
+  MONGO_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  MONGO_MAX_POOL_SIZE: z.coerce.number().int().positive().default(20),
+```
+
+`src/plugins/mongo.ts` — construct the client as:
+```ts
+    const client = new MongoClient(app.config.MONGO_URI, {
+      timeoutMS: app.config.MONGO_TIMEOUT_MS,
+      maxPoolSize: app.config.MONGO_MAX_POOL_SIZE,
+    });
+```
+
+`src/db/indexes.ts` — add to the `C.shipments` list:
+```ts
+    { key: { plannedEnd: 1, plannedStart: 1 } },
+```
+
+`src/modules/shipments/driver.routes.ts` — replace the per-shipment loop in `GET /driver/shipments` with batched lookups:
+```ts
+    const allDoIds = docs.flatMap((d) => doIdsOf(d.stops));
+    const allLocIds = docs.flatMap((d) => d.stops.map((s) => s.locationId));
+    const [dos, locs] = await Promise.all([
+      app.db.collection<DeliveryOrderDoc>(C.deliveryOrders).find({ _id: { $in: allDoIds } }).toArray(),
+      app.db.collection(C.locations).find({ _id: { $in: allLocIds } }).toArray(),
+    ]);
+    const doById = new Map(dos.map((d) => [d._id.toHexString(), d]));
+    const locById = new Map(locs.map((l) => [l._id.toHexString(), l]));
+    const items = docs.map((doc) => ({
+      ...shipmentView(doc),
+      deliveryOrders: doIdsOf(doc.stops).map((id) => doById.get(id.toHexString())).filter((d): d is DeliveryOrderDoc => !!d).map(toApi),
+      locations: [...new Set(doc.stops.map((s) => s.locationId.toHexString()))]
+        .map((id) => locById.get(id))
+        .filter((l): l is NonNullable<typeof l> => !!l)
+        .map((l) => ({ id: l._id.toHexString(), code: l.code, name: l.name, lat: l.geo.coordinates[1], lng: l.geo.coordinates[0], geofenceRadiusM: l.geofenceRadiusM })),
+    }));
+    return { items };
+```
+
+`.env.example` — add `MONGO_TIMEOUT_MS=5000` and `MONGO_MAX_POOL_SIZE=20`. README — add a short "Performance" note pointing to spec §13 (every query bounded by `MONGO_TIMEOUT_MS`; reporting must not run on the primary).
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `npx vitest run && npm run typecheck`
+Expected: all PASS (the existing driver-list tests in `test/api/shipments-dispatch.test.ts` still pass).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A
+git commit -m "perf: bound Mongo operations and pool size, window index, batched driver job lookups" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01U9JUaE2pxXmH3GFPZLKEr6"
+```
+
+---
+
 ## Self-review notes (plan author)
 
 - **Spec coverage:** §3.3 deliveryOrders/shipments (Tasks 3, 8), §3.2 stops/legs (Task 5), §3.4 matching on create + re-match on vehicle (Tasks 3, 8), §4 blocking rules and warnings (Task 7; distance-gap warning deferred, see header), §5.1 lifecycle up to ACCEPTED/decline/cancel (Tasks 9–10), §5.2 DO UNASSIGNED/PLANNED/CANCELLED (Tasks 3, 8, 9), §8.3 delivery orders + shipments + availability + driver accept/decline + `GET /driver/shipments` (Tasks 3–4, 7–12). Phase-2 requirements §1 availability and two-level status (Tasks 2, 6, 7, 11). Events, PODs, pallets, IN_TRANSIT/COMPLETED/CLOSED transitions, POD templates in the driver list: Plan 3.
