@@ -1,0 +1,103 @@
+import { ObjectId, type AnyBulkWriteOperation, type Db, type Document } from 'mongodb';
+import { AppError, unprocessable } from '../../lib/errors.js';
+import { writeAudit } from '../../lib/audit.js';
+import { prepareDoc } from '../master/resource.js';
+import type { ParsedRow } from './parse.js';
+import { IMPORT_SPECS, type ImportCtx, type ImportEntity, RowError } from './specs.js';
+
+export interface ImportRowResult {
+  row: number;
+  key: string | null;
+  action: 'create' | 'update' | 'error';
+  errors: string[];
+}
+
+export interface ImportReport {
+  entity: ImportEntity;
+  dryRun: boolean;
+  total: number;
+  created: number;
+  updated: number;
+  errors: number;
+  rows: ImportRowResult[];
+}
+
+export async function runImport(
+  db: Db,
+  entity: ImportEntity,
+  rows: ParsedRow[],
+  opts: { dryRun: boolean; by: string },
+): Promise<ImportReport> {
+  const spec = IMPORT_SPECS[entity];
+  const coll = db.collection(spec.def.collection);
+  const cache = new Map<string, string>();
+  const ctx: ImportCtx = {
+    async idByCode(collection, code, column) {
+      const k = `${collection}:${code}`;
+      const hit = cache.get(k);
+      if (hit) return hit;
+      const doc = await db.collection(collection).findOne({ code }, { projection: { _id: 1 } });
+      if (!doc) throw new RowError(`${column}: unknown code "${code}"`);
+      const id = doc._id.toHexString();
+      cache.set(k, id);
+      return id;
+    },
+  };
+
+  const results: ImportRowResult[] = [];
+  const ops: AnyBulkWriteOperation<Document>[] = [];
+  const seen = new Set<string>();
+  const now = new Date();
+
+  for (const { rowNumber, values } of rows) {
+    const get = (column: string) => {
+      const v = values[column.toLowerCase()];
+      return v === undefined || v === '' ? undefined : v;
+    };
+    const dupKey = spec.keyOf(get) ?? null;
+    const result: ImportRowResult = { row: rowNumber, key: dupKey, action: 'error', errors: [] };
+    try {
+      if (dupKey !== null) {
+        if (seen.has(dupKey)) throw new RowError(`duplicate ${spec.key} "${dupKey}" earlier in this file`);
+        seen.add(dupKey);
+      }
+      const parsed = spec.def.body.safeParse(await spec.toBody(get, ctx));
+      if (!parsed.success) {
+        result.errors = parsed.error.issues.map((i) => `${i.path.join('.') || 'row'}: ${i.message}`);
+      } else {
+        const keyValue = (spec.def.toDb ? spec.def.toDb({ ...parsed.data }) : parsed.data)[spec.key];
+        result.key = String(keyValue);
+        const existing = await coll.findOne({ [spec.key]: keyValue });
+        const prepared = await prepareDoc(spec.def, db, parsed.data as Record<string, unknown>, existing);
+        if (existing) {
+          result.action = 'update';
+          ops.push({ updateOne: { filter: { _id: existing._id as ObjectId }, update: { $set: { ...prepared, updatedAt: now } } } });
+        } else {
+          result.action = 'create';
+          ops.push({ insertOne: { document: { ...prepared, active: true, createdAt: now, updatedAt: now } } });
+        }
+      }
+    } catch (e) {
+      if (e instanceof RowError || e instanceof AppError) result.errors = [e.message];
+      else throw e;
+    }
+    if (result.errors.length > 0) result.action = 'error';
+    results.push(result);
+  }
+
+  const report: ImportReport = {
+    entity,
+    dryRun: opts.dryRun,
+    total: results.length,
+    created: results.filter((r) => r.action === 'create').length,
+    updated: results.filter((r) => r.action === 'update').length,
+    errors: results.filter((r) => r.action === 'error').length,
+    rows: results,
+  };
+
+  if (opts.dryRun) return report;
+  if (report.errors > 0) throw unprocessable('IMPORT_HAS_ERRORS', `${report.errors} row(s) have errors; nothing was saved`, report);
+  if (ops.length > 0) await coll.bulkWrite(ops, { ordered: true });
+  await writeAudit(db, { entity: 'import', entityId: entity, action: 'import', by: opts.by, after: { created: report.created, updated: report.updated } });
+  return report;
+}
