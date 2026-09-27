@@ -164,6 +164,12 @@ export const podRoutes: FastifyPluginAsyncZod = async (app) => {
       const d = (await orders.findOne({ _id: p.doId }, { session }))!;
       const next = deriveDoStatus(d.status, { loaded: true, latestPod: { outcome: p.outcome, status: decision } });
       if (next !== d.status) {
+        // No matchedCount check needed (P3-R17): `d.status` was read inside this same session/transaction,
+        // so it is part of this transaction's snapshot. If some other write had changed the DO's status
+        // between that read and this update, MongoDB detects the write conflict at commit time and aborts
+        // (and the driver retries) this whole transaction — the retry re-reads `d` and recomputes `next`
+        // against the current status. So whenever this update actually commits, its filter is guaranteed
+        // to still match; a mismatch can't silently no-op here the way it could outside a transaction.
         await orders.updateOne({ _id: d._id, status: d.status }, { $set: { status: next, updatedAt: new Date(), updatedBy: by } }, { session });
       }
       await writeAudit(app.db, { entity: 'pod', entityId: id, action: decision === 'verified' ? 'verify' : 'reject', by, after: { reason } }, { session });

@@ -30,10 +30,12 @@
     "fastify-plugin": "^5.1.0",
     "fastify-type-provider-zod": "^4.0.2",
     "mongodb": "^6.21.0",
+    "pdfmake": "^0.2.23",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
+    "@types/pdfmake": "^0.3.3",
     "mongodb-memory-server": "^10.4.3",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",

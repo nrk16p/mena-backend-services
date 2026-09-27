@@ -3,14 +3,14 @@ import { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { actorOf } from '../../lib/audit.js';
-import { notFound } from '../../lib/errors.js';
+import { notFound, unprocessable } from '../../lib/errors.js';
 import { IdParams } from '../../lib/ids.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
 import { ShipmentItem } from '../shipments/shipment.schemas.js';
 import { shipmentView } from '../shipments/shipment.service.js';
 import type { ShipmentDoc } from '../shipments/shipment.types.js';
-import { type TripSummaryDoc, closeShipment } from './close.service.js';
+import { type TripSummaryDoc, closeShipment, generateSummaryPdf } from './close.service.js';
 
 const TripSummaryItem = z.object({
   id: z.string(),
@@ -73,6 +73,29 @@ export const summaryRoutes: FastifyPluginAsyncZod = async (app) => {
       const s = await app.db.collection<TripSummaryDoc>(C.tripSummaries).findOne({ shipmentId: new ObjectId(req.params.id) });
       if (!s) throw notFound('Trip summary');
       return toApi(s);
+    },
+  );
+
+  app.get(
+    '/shipments/:id/summary.pdf',
+    { schema: { tags: ['shipments'], params: IdParams }, preHandler: app.requireRoles(...STAFF_ROLES) },
+    async (req, reply) => {
+      const s = await app.db.collection<TripSummaryDoc>(C.tripSummaries).findOne({ shipmentId: new ObjectId(req.params.id) });
+      if (!s) throw notFound('Trip summary');
+      if (!s.pdfKey) throw unprocessable('PDF_NOT_READY', 'The PDF is not generated yet');
+      const obj = await app.storage.get(s.pdfKey);
+      if (!obj) throw unprocessable('PDF_NOT_READY', 'The PDF file is missing; regenerate it');
+      return reply.header('content-type', 'application/pdf').header('content-disposition', `inline; filename="${s.shipmentNo}.pdf"`).send(obj.body);
+    },
+  );
+
+  app.post(
+    '/shipments/:id/summary.pdf/regenerate',
+    { schema: { tags: ['shipments'], params: IdParams, response: { 200: z.object({ pdfKey: z.string() }) } }, preHandler: app.requireRoles('admin', 'planner') },
+    async (req) => {
+      const s = await app.db.collection<TripSummaryDoc>(C.tripSummaries).findOne({ shipmentId: new ObjectId(req.params.id) });
+      if (!s) throw notFound('Trip summary');
+      return { pdfKey: await generateSummaryPdf(app, s._id, actorOf(req)) };
     },
   );
 };

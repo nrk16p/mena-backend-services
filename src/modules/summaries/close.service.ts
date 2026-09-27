@@ -1,12 +1,19 @@
+import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { ObjectId } from 'mongodb';
 import { C } from '../../db/collections.js';
-import { unprocessable } from '../../lib/errors.js';
+import { writeAudit } from '../../lib/audit.js';
+import { notFound, unprocessable } from '../../lib/errors.js';
+import { mapLimit } from '../../lib/pool.js';
 import type { EventDoc } from '../execution/events.service.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
+import type { PodField } from '../pod-templates/pod-templates.schemas.js';
+import type { PodTemplateDoc } from '../pod-templates/pod-templates.service.js';
+import { DEFAULT_POD_FIELDS } from '../pods/pod-validation.js';
 import type { PodDoc } from '../pods/pods.service.js';
 import { doIdsOf, releaseDos, transition } from '../shipments/shipment.service.js';
 import type { ShipmentDoc } from '../shipments/shipment.types.js';
+import { buildSummaryPdf } from './pdf.js';
 
 /** A POD file as it was when the trip was locked; Task 9 re-hashes the stored object and flags a mismatch. */
 export interface SummaryPodFile {
@@ -123,5 +130,143 @@ export async function closeShipment(
       return { releasedDoNos };
     },
   });
+  // The PDF is built after the close commits: a PDF failure must never undo a close; it is logged
+  // and can be rebuilt with POST /shipments/:id/summary.pdf/regenerate.
+  try {
+    summary.pdfKey = await generateSummaryPdf(app, summary._id, by);
+  } catch (err) {
+    app.log.error({ err, shipmentNo: shipment.shipmentNo }, 'summary PDF generation failed');
+  }
   return { shipment: updated, summary };
+}
+
+const MAX_PHOTOS_PER_DO = 2;
+/** Storage calls in flight at once while re-hashing a summary's POD files (P3 ruling). */
+const FILE_IO_CONCURRENCY = 4;
+
+/** Printable `label: value` lines for the non-file answers, in template order. */
+function answerLines(fields: PodField[], answers: Record<string, unknown>): { label: string; value: string }[] {
+  const lines: { label: string; value: string }[] = [];
+  for (const f of fields) {
+    const v = answers[f.key];
+    if (v === undefined || v === null || v === '') continue;
+    if (f.type === 'text' || f.type === 'select') lines.push({ label: f.label, value: String(v) });
+    else if (f.type === 'number') lines.push({ label: f.label, value: f.unit ? `${String(v)} ${f.unit}` : String(v) });
+    else if (f.type === 'checkbox') lines.push({ label: f.label, value: v === true ? 'ใช่' : 'ไม่ใช่' });
+    else if (f.type === 'qtyLines' || f.type === 'palletLines') lines.push({ label: f.label, value: `${Array.isArray(v) ? v.length : 0} รายการ` });
+  }
+  return lines;
+}
+
+type FileFailureReason = 'missing' | 'mismatch' | 'too_large';
+type FileCheck = { ok: true; buf: Buffer } | { ok: false; reason: FileFailureReason };
+
+const FILE_MARKERS: Record<FileFailureReason, string> = {
+  missing: 'ไฟล์หายไปจากระบบจัดเก็บ',
+  mismatch: 'ไฟล์ไม่ตรงกับลายนิ้วมือที่บันทึกไว้ตอนปิดงาน (อาจถูกแก้ไขภายหลัง)',
+  too_large: 'ไฟล์มีขนาดใหญ่ผิดปกติ ข้ามการตรวจสอบ',
+};
+
+/**
+ * Re-hashes a POD file straight from storage against the fingerprint the trip summary locked in,
+ * streamed and capped at `maxBytes`, never inside a Mongo transaction. A presigned upload window is
+ * only 5 minutes, but the object behind a key can still be replaced after that — this catches it
+ * instead of trusting the summary's stored hash blindly. Never throws: the caller turns a miss into
+ * a printed marker line so one bad file never keeps the whole evidence PDF from being generated.
+ */
+async function verifyStoredFile(app: FastifyInstance, file: SummaryPodFile, maxBytes: number): Promise<FileCheck> {
+  const stream = await app.storage.getStream(file.key);
+  if (!stream) return { ok: false, reason: 'missing' };
+  const hash = createHash('sha256');
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    for await (const chunk of stream) {
+      const buf: Buffer = typeof chunk === 'string' ? Buffer.from(chunk) : (chunk as Buffer);
+      bytes += buf.length;
+      if (bytes > maxBytes) return { ok: false, reason: 'too_large' };
+      hash.update(buf);
+      chunks.push(buf);
+    }
+  } finally {
+    if (!stream.destroyed) stream.destroy();
+  }
+  if (hash.digest('hex') !== file.sha256) return { ok: false, reason: 'mismatch' };
+  return { ok: true, buf: Buffer.concat(chunks) };
+}
+
+export async function generateSummaryPdf(app: FastifyInstance, summaryId: ObjectId, by: string): Promise<string> {
+  const summary = await app.db.collection<TripSummaryDoc>(C.tripSummaries).findOne({ _id: summaryId });
+  if (!summary) throw notFound('Trip summary');
+  const shipment = (await app.db.collection<ShipmentDoc>(C.shipments).findOne({ _id: summary.shipmentId }))!;
+  const vehicleIds = [shipment.head?.vehicleId, shipment.tail?.vehicleId].filter((v): v is ObjectId => !!v);
+  const driverIds = [shipment.head?.driverId, shipment.tail?.driverId].filter((v): v is ObjectId => !!v);
+  const [vehicles, drivers, locations, events, dos, pods] = await Promise.all([
+    app.db.collection(C.vehicles).find({ _id: { $in: vehicleIds } }).toArray(),
+    app.db.collection(C.drivers).find({ _id: { $in: driverIds } }).toArray(),
+    app.db.collection(C.locations).find({ _id: { $in: shipment.stops.map((s) => s.locationId) } }).toArray(),
+    app.db.collection<EventDoc>(C.events).find({ shipmentId: shipment._id }).sort({ deviceTime: 1, receivedAt: 1, _id: 1 }).toArray(),
+    app.db.collection<DeliveryOrderDoc>(C.deliveryOrders).find({ _id: { $in: summary.evidence.pods.map((p) => p.doId) } }).toArray(),
+    app.db.collection<PodDoc>(C.pods).find({ _id: { $in: summary.evidence.pods.map((p) => p.podId) } }).toArray(),
+  ]);
+  const [clients, materials, templates] = await Promise.all([
+    app.db.collection(C.clients).find({ _id: { $in: dos.map((d) => d.clientId) } }).toArray(),
+    app.db.collection(C.materials).find({ _id: { $in: dos.map((d) => d.materialId) } }).toArray(),
+    app.db.collection<PodTemplateDoc>(C.podTemplates).find({ _id: { $in: pods.map((p) => p.templateId).filter((id): id is ObjectId => !!id) } }).toArray(),
+  ]);
+  const name = <T extends { _id: ObjectId }>(list: T[], id: ObjectId, field: keyof T) => String(list.find((x) => x._id.equals(id))?.[field] ?? '');
+  const fieldsOf = (p: PodDoc | undefined): PodField[] =>
+    (p?.templateId ? templates.find((t) => t._id.equals(p.templateId!))?.fields : undefined) ?? DEFAULT_POD_FIELDS;
+
+  // Every photo/signature file this PDF might embed, across every DO, re-hashed at
+  // FILE_IO_CONCURRENCY total (not per DO) so a shipment with many DOs never fans out storage
+  // reads beyond that cap — all of this after `closeShipment`'s transaction has already committed.
+  const perDo = summary.evidence.pods.map((ep) => {
+    const p = pods.find((x) => x._id.equals(ep.podId));
+    const fields = fieldsOf(p);
+    const typeOf = new Map(fields.map((f) => [f.key, f.type]));
+    const photos = ep.files.filter((file) => typeOf.get(file.fieldKey) === 'photo').slice(0, MAX_PHOTOS_PER_DO);
+    const signatures = ep.files.filter((file) => typeOf.get(file.fieldKey) === 'signature');
+    return { ep, p, fields, files: [...photos, ...signatures] };
+  });
+  const allFiles = perDo.flatMap((x) => x.files);
+  const checks = await mapLimit(allFiles, FILE_IO_CONCURRENCY, (file) => verifyStoredFile(app, file, app.config.UPLOAD_MAX_BYTES));
+  const checkByKey = new Map(allFiles.map((file, i) => [file.key, checks[i]!]));
+
+  const pdf = await buildSummaryPdf({
+    shipmentNo: shipment.shipmentNo,
+    plannedStart: shipment.plannedStart,
+    closedAt: summary.lockedAt,
+    closedBy: summary.lockedBy,
+    vehicles: vehicleIds.map((id) => name(vehicles, id, 'plate')),
+    drivers: driverIds.map((id) => name(drivers, id, 'name')),
+    stops: shipment.stops.map((s) => ({
+      seq: s.seq,
+      location: name(locations, s.locationId, 'name'),
+      events: events.filter((e) => e.stopId?.equals(s.stopId)).map((e) => ({ code: e.code, at: e.deviceTime })),
+    })),
+    dos: perDo.map(({ ep, p, fields, files }) => {
+      const d = dos.find((x) => x._id.equals(ep.doId))!;
+      const images: Buffer[] = [];
+      const markers: { label: string; value: string }[] = [];
+      for (const file of files) {
+        const check = checkByKey.get(file.key)!;
+        if (check.ok) images.push(check.buf);
+        else markers.push({ label: `ไฟล์ (${file.fieldKey})`, value: FILE_MARKERS[check.reason] });
+      }
+      return {
+        doNo: ep.doNo, client: name(clients, d.clientId, 'name'), material: name(materials, d.materialId, 'name'), qty: d.qty, unit: d.unit,
+        outcome: ep.outcome, reasonCode: ep.reasonCode,
+        answers: [...(p ? answerLines(fields, p.answers) : []), ...markers],
+        hash: ep.hash, images,
+      };
+    }),
+    flags: summary.evidence.flags,
+  });
+  const key = `summaries/${shipment.shipmentNo}.pdf`;
+  await app.storage.put(key, pdf, 'application/pdf');
+  await app.db.collection<TripSummaryDoc>(C.tripSummaries).updateOne({ _id: summaryId }, { $set: { pdfKey: key } });
+  // Writing/overwriting pdfKey is a staff mutation (whether triggered by close or by regenerate): one audit entry per generation.
+  await writeAudit(app.db, { entity: 'tripSummary', entityId: summaryId.toHexString(), action: 'pdf', by, after: { pdfKey: key } });
+  return key;
 }

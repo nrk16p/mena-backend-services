@@ -58,4 +58,38 @@ describe('POD review', () => {
     const res = await app.inject({ method: 'POST', url: `/api/v1/pods/${pod.id}/verify`, headers: f.planner });
     expect(ok(res).status).toBe('verified');
   });
+
+  // P3-R17: the review queue gap — two reviewers acting on the same POD at once. `review()`'s
+  // `findOneAndUpdate({ _id, status: 'submitted' }, ...)` inside a transaction is the guard: MongoDB
+  // detects the write conflict between the two concurrent transactions on the same document, aborts
+  // and retries the loser, and its retry sees the POD already reviewed.
+  it('lets exactly one of two concurrent reviewers decide the same POD, whether both verify or one verifies and one rejects', async () => {
+    {
+      // Race: two reviewers both try to verify.
+      const { shipment, dos } = await acceptedShipment(app, f, { day: '2026-10-20' });
+      await toDropStop(app, f, shipment);
+      const pod = ok(await deliveredPod(app, f, shipment, dos[0]), 201);
+      const [a, b] = await Promise.all([post(`/pods/${pod.id}/verify`), post(`/pods/${pod.id}/verify`)]);
+      const statuses = [a.statusCode, b.statusCode].sort();
+      expect(statuses).toEqual([200, 422]);
+      const loser = a.statusCode === 200 ? b : a;
+      expect(loser.json().code).toBe('POD_ALREADY_REVIEWED');
+      expect(await app.db.collection(C.auditLog).countDocuments({ entity: 'pod', entityId: pod.id })).toBe(1);
+    }
+    {
+      // Race: one reviewer verifies while another rejects the same POD.
+      const { shipment, dos } = await acceptedShipment(app, f, { day: '2026-10-21' });
+      await toDropStop(app, f, shipment);
+      const pod = ok(await deliveredPod(app, f, shipment, dos[0]), 201);
+      const [a, b] = await Promise.all([
+        post(`/pods/${pod.id}/verify`),
+        app.inject({ method: 'POST', url: `/api/v1/pods/${pod.id}/reject`, headers: f.admin, payload: { reason: 'race' } }),
+      ]);
+      const statuses = [a.statusCode, b.statusCode].sort();
+      expect(statuses).toEqual([200, 422]);
+      const loser = a.statusCode === 200 ? b : a;
+      expect(loser.json().code).toBe('POD_ALREADY_REVIEWED');
+      expect(await app.db.collection(C.auditLog).countDocuments({ entity: 'pod', entityId: pod.id })).toBe(1);
+    }
+  });
 });

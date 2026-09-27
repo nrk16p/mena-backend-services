@@ -100,9 +100,13 @@ describe('close shipment', () => {
     expect(stale.json().code).toBe('VERSION_CONFLICT');
     const closed = ok(await admin(`/shipments/${shipment.id}/close`, { version: await versionOf(shipment.id) }));
     expect(closed).toMatchObject({ status: 'CLOSED', version: after.version + 1, summaryId: expect.any(String) });
-    // The summary snapshots each POD's file list (Task 9 re-hashes the files against it).
+    // The summary snapshots each POD's file list (Task 9 re-hashes the files against it), and close
+    // builds the evidence PDF right after, so pdfKey is populated rather than staying null.
     const summary = ok(await app.inject({ method: 'GET', url: `/api/v1/shipments/${shipment.id}/summary`, headers: f.viewer }));
-    expect(summary).toMatchObject({ id: closed.summaryId, shipmentId: shipment.id, shipmentNo: closed.shipmentNo, pdfKey: null, adjustments: [] });
+    expect(summary).toMatchObject({
+      id: closed.summaryId, shipmentId: shipment.id, shipmentNo: closed.shipmentNo, pdfKey: `summaries/${closed.shipmentNo}.pdf`, adjustments: [],
+    });
+    expect(await app.db.collection(C.auditLog).countDocuments({ entity: 'tripSummary', entityId: closed.summaryId, action: 'pdf' })).toBe(1);
     expect(summary.evidence.pods[0].files.map((x: { fieldKey: string }) => x.fieldKey).sort()).toEqual(['goodsPhoto', 'receiverSign']);
     expect(summary.evidence.pods[0].files[0]).toEqual({ fieldKey: expect.any(String), key: expect.any(String), sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect(summary.evidence.distances.legs).toHaveLength(1);
