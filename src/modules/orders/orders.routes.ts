@@ -4,11 +4,13 @@ import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { actorOf, writeAudit } from '../../lib/audit.js';
 import { nextNumber } from '../../lib/counters.js';
-import { conflict, notFound, unprocessable } from '../../lib/errors.js';
+import { AppError, conflict, notFound, unprocessable } from '../../lib/errors.js';
 import { IdParams, objectIdString } from '../../lib/ids.js';
+import { IssueSchema, type Issue } from '../../lib/issues.js';
 import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
+import { withTransaction } from '../../lib/tx.js';
 import { DO_STATUSES, type DeliveryOrderDoc } from './order.types.js';
 import { DoFields, DoItem, DoWithWarnings, PatchDoBody } from './orders.schemas.js';
 import { prepareDoFields, updateDoIfUnchanged } from './orders.service.js';
@@ -80,6 +82,88 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
       }
       const page = await paginate(coll(), f, q);
       return { items: page.items.map(toApi), nextCursor: page.nextCursor };
+    },
+  );
+
+  const BulkResult = z.object({
+    index: z.number(),
+    ok: z.boolean(),
+    id: z.string().nullable(),
+    doNo: z.string().nullable(),
+    warnings: z.array(IssueSchema),
+    errors: z.array(IssueSchema),
+  });
+  const BulkReport = z.object({
+    dryRun: z.boolean(),
+    total: z.number(),
+    valid: z.number(),
+    invalid: z.number(),
+    results: z.array(BulkResult),
+  });
+
+  app.post(
+    '/delivery-orders/bulk',
+    {
+      schema: {
+        tags: ['delivery-orders'],
+        querystring: z.object({ dryRun: z.enum(['true', 'false']).default('true') }),
+        body: z.object({ items: z.array(DoFields).min(1).max(500) }),
+        response: { 200: BulkReport },
+      },
+      preHandler: write,
+    },
+    async (req) => {
+      const dryRun = req.query.dryRun === 'true';
+      const prepared: { set: Partial<DeliveryOrderDoc>; warnings: Issue[] }[] = [];
+      const results: z.infer<typeof BulkResult>[] = [];
+      for (const [index, input] of req.body.items.entries()) {
+        try {
+          const p = await prepareDoFields(app.db, input, null);
+          prepared.push(p);
+          results.push({ index, ok: true, id: null, doNo: null, warnings: p.warnings, errors: [] });
+        } catch (e) {
+          if (!(e instanceof AppError)) throw e;
+          results.push({ index, ok: false, id: null, doNo: null, warnings: [], errors: [{ code: e.code, message: e.message, details: e.details }] });
+        }
+      }
+      const invalid = results.filter((r) => !r.ok).length;
+      const report = { dryRun, total: results.length, valid: results.length - invalid, invalid, results };
+      if (dryRun) return report;
+      if (invalid > 0) throw unprocessable('BULK_HAS_ERRORS', `${invalid} item(s) have errors; nothing was saved`, report);
+
+      const by = actorOf(req);
+      const now = new Date();
+      const docs: DeliveryOrderDoc[] = [];
+      for (const p of prepared) {
+        docs.push({
+          ...p.set,
+          _id: new ObjectId(),
+          doNo: await nextNumber(app.db, 'DO'),
+          status: 'UNASSIGNED',
+          shipmentId: null,
+          pickupStopId: null,
+          dropStopId: null,
+          cancelledAt: null,
+          cancelReason: null,
+          createdBy: by,
+          createdAt: now,
+          updatedBy: by,
+          updatedAt: now,
+        } as DeliveryOrderDoc);
+      }
+      await withTransaction(app.mongo, async (session) => {
+        await coll().insertMany(docs, { session });
+        await writeAudit(
+          app.db,
+          { entity: 'deliveryOrder', entityId: 'bulk', action: 'bulk-create', by, after: { doNos: docs.map((d) => d.doNo) } },
+          { session },
+        );
+      });
+      docs.forEach((d, i) => {
+        results[i]!.id = d._id.toHexString();
+        results[i]!.doNo = d.doNo;
+      });
+      return report;
     },
   );
 
