@@ -3,7 +3,7 @@ import { ObjectId, type Db, type Filter } from 'mongodb';
 import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { actorOf, writeAudit } from '../../lib/audit.js';
-import { notFound, unprocessable } from '../../lib/errors.js';
+import { conflict, notFound, unprocessable } from '../../lib/errors.js';
 import { IdParams, objectIdString } from '../../lib/ids.js';
 import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { hashPassword } from '../../lib/passwords.js';
@@ -43,13 +43,26 @@ const safeUser = (u: UserDoc) => {
   return toApi(rest);
 };
 
-async function assertDriverLink(db: Db, roles: Role[], driverId: ObjectId | null): Promise<void> {
-  if (roles.includes('driver') && !driverId) {
+/**
+ * Only an active user with the driver role holds a driverId (roadmap carry-forward: a stale link on
+ * a demoted or deactivated account would otherwise block linking the driver to a new account).
+ */
+async function assertDriverLink(db: Db, roles: Role[], driverId: ObjectId | null, active: boolean, userId: ObjectId | null): Promise<void> {
+  const isDriver = roles.includes('driver');
+  if (isDriver && active && !driverId) {
     throw unprocessable('DRIVER_LINK_REQUIRED', 'Users with the driver role must be linked to a driver');
   }
-  if (driverId && !(await db.collection(C.drivers).countDocuments({ _id: driverId }, { limit: 1 }))) {
+  if (!driverId) return;
+  if (!isDriver || !active) {
+    throw unprocessable('DRIVER_LINK_NOT_ALLOWED', 'Only an active user with the driver role can be linked to a driver');
+  }
+  if (!(await db.collection(C.drivers).countDocuments({ _id: driverId }, { limit: 1 }))) {
     throw unprocessable('INVALID_REFERENCE', 'driverId does not exist', { field: 'driverId' });
   }
+  const holder = await db
+    .collection<UserDoc>(C.users)
+    .findOne({ driverId, ...(userId ? { _id: { $ne: userId } } : {}) }, { projection: { username: 1 } });
+  if (holder) throw conflict('DRIVER_ALREADY_LINKED', `This driver is already linked to user ${holder.username}`, { username: holder.username });
 }
 
 export const userRoutes: FastifyPluginAsyncZod = async (app) => {
@@ -74,7 +87,7 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.post('/users', { schema: { tags: ['users'], body: CreateUserBody, response: { 201: UserItem } }, preHandler: admin }, async (req, reply) => {
     const driverId = req.body.driverId ? new ObjectId(req.body.driverId) : null;
-    await assertDriverLink(app.db, req.body.roles, driverId);
+    await assertDriverLink(app.db, req.body.roles, driverId, true, null);
     const u = await createUser(app.db, { ...req.body, driverId });
     await writeAudit(app.db, { entity: 'user', entityId: u._id.toHexString(), action: 'create', by: actorOf(req), after: safeUser(u) });
     return reply.status(201).send(safeUser(u));
@@ -85,9 +98,11 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     const existing = await users().findOne({ _id });
     if (!existing) throw notFound('User');
     const roles = req.body.roles ?? existing.roles;
-    const driverId = req.body.driverId === undefined ? existing.driverId : req.body.driverId ? new ObjectId(req.body.driverId) : null;
-    await assertDriverLink(app.db, roles, driverId);
     const willBeActive = req.body.active ?? existing.active;
+    const requested = req.body.driverId === undefined ? undefined : req.body.driverId ? new ObjectId(req.body.driverId) : null;
+    // Keep the link only on an active driver account; otherwise release it so the driver can be linked again.
+    const driverId = requested !== undefined ? requested : roles.includes('driver') && willBeActive ? existing.driverId : null;
+    await assertDriverLink(app.db, roles, driverId, willBeActive, _id);
     const willBeAdmin = roles.includes('admin');
     const wasActiveAdmin = existing.active && existing.roles.includes('admin');
     if (wasActiveAdmin && !(willBeActive && willBeAdmin)) {
