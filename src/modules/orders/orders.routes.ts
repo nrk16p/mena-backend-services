@@ -4,14 +4,14 @@ import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { actorOf, writeAudit } from '../../lib/audit.js';
 import { nextNumber } from '../../lib/counters.js';
-import { notFound, unprocessable } from '../../lib/errors.js';
+import { conflict, notFound, unprocessable } from '../../lib/errors.js';
 import { IdParams, objectIdString } from '../../lib/ids.js';
 import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
 import { DO_STATUSES, type DeliveryOrderDoc } from './order.types.js';
 import { DoFields, DoItem, DoWithWarnings, PatchDoBody } from './orders.schemas.js';
-import { prepareDoFields } from './orders.service.js';
+import { prepareDoFields, updateDoIfUnchanged } from './orders.service.js';
 
 export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
   const read = app.requireRoles(...STAFF_ROLES);
@@ -97,12 +97,8 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
       }
       const { set, warnings } = await prepareDoFields(app.db, req.body, existing);
       const by = actorOf(req);
-      const updated = await coll().findOneAndUpdate(
-        { _id: existing._id },
-        { $set: { ...set, updatedBy: by, updatedAt: new Date() } },
-        { returnDocument: 'after' },
-      );
-      if (!updated) throw notFound('Delivery order');
+      const updated = await updateDoIfUnchanged(app.db, existing, { ...set, updatedBy: by, updatedAt: new Date() });
+      if (!updated) throw conflict('DO_CHANGED', 'The delivery order changed; reload and try again');
       await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'update', by, before: toApi(existing), after: toApi(updated) });
       return { ...toApi(updated), warnings };
     },
@@ -125,7 +121,7 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
         { returnDocument: 'after' },
       );
       if (!updated) throw unprocessable('DO_NOT_CANCELLABLE', 'The delivery order changed; reload and try again');
-      await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'cancel', by, after: { reason: req.body.reason } });
+      await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'cancel', by, before: toApi(existing), after: toApi(updated) });
       return toApi(updated);
     },
   );

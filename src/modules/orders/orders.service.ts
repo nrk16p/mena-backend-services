@@ -42,6 +42,23 @@ export async function rematchJobGroup(db: Db, d: DeliveryOrderDoc, truckTypeId: 
 }
 
 /**
+ * Applies `set` only if the DO's status and shipmentId still match `existing` (the caller's
+ * snapshot), so a concurrent shipment-assignment or cancel between load and write can't be
+ * clobbered by a stale edit. Returns null when the stored document has moved on.
+ */
+export async function updateDoIfUnchanged(
+  db: Db,
+  existing: DeliveryOrderDoc,
+  set: Partial<DeliveryOrderDoc>,
+): Promise<DeliveryOrderDoc | null> {
+  return db.collection<DeliveryOrderDoc>(C.deliveryOrders).findOneAndUpdate(
+    { _id: existing._id, status: existing.status, shipmentId: existing.shipmentId },
+    { $set: set },
+    { returnDocument: 'after' },
+  );
+}
+
+/**
  * Turns a create body (all fields) or a patch body (some fields) into the fields to $set.
  * `existing` is null on create. Throws 422 for rule violations; returns job-group warnings.
  */
@@ -89,8 +106,10 @@ export async function prepareDoFields(
   }
   await assertActiveRefs(db, refChecks);
 
-  if (input.unit !== undefined && input.unit !== null) set.unit = input.unit;
-  else if (!existing) {
+  if (input.unit !== undefined && input.unit !== null) {
+    set.unit = input.unit;
+  } else if (!existing || (set.materialId !== undefined && !set.materialId.equals(existing.materialId))) {
+    // Creating, or the material changed without an explicit unit: pull the unit from the (new) material.
     const material = await db.collection(C.materials).findOne({ _id: merged.materialId });
     set.unit = String(material?.unit ?? '');
   }

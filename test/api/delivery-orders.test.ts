@@ -75,6 +75,18 @@ describe('delivery orders', () => {
     expect(cancelled.json()).toMatchObject({ status: 'CANCELLED', cancelReason: 'ลูกค้ายกเลิก' });
     const edit = await call('PATCH', `/delivery-orders/${d.id}`, f.planner, { qty: 2 });
     expect(edit.json().code).toBe('DO_NOT_EDITABLE');
+    const audit = await app.db.collection(C.auditLog).findOne({ entity: 'deliveryOrder', entityId: d.id, action: 'cancel' });
+    expect(audit?.before).toMatchObject({ status: 'UNASSIGNED' });
+    expect(audit?.after).toMatchObject({ status: 'CANCELLED', cancelReason: 'ลูกค้ายกเลิก' });
+  });
+
+  it('recomputes unit when materialId changes without an explicit unit, but keeps an explicit unit', async () => {
+    const d = await createDo(app, f); // BULK → ton
+    expect(d.unit).toBe('ton');
+    const toBag = await call('PATCH', `/delivery-orders/${d.id}`, f.planner, { materialId: f.ids.bag });
+    expect(toBag.json().unit).toBe('bag');
+    const explicit = await call('PATCH', `/delivery-orders/${d.id}`, f.planner, { materialId: f.ids.bulk, unit: 'custom' });
+    expect(explicit.json().unit).toBe('custom');
   });
 
   it('enforces roles', async () => {
