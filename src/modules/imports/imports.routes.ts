@@ -36,7 +36,7 @@ export const importRoutes: FastifyPluginAsyncZod = async (app) => {
       const file = await req.file();
       if (!file) throw badRequest('FILE_REQUIRED', 'Attach the file in the "file" form field');
       const rows = await parseTable(await file.toBuffer(), file.filename);
-      return runImport(app.db, req.params.entity, rows, { dryRun: req.query.dryRun === 'true', by: actorOf(req) });
+      return runImport(app.mongo, app.db, req.params.entity, rows, { dryRun: req.query.dryRun === 'true', by: actorOf(req) });
     },
   );
 };

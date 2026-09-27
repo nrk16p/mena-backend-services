@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
+import { applyImportWrites } from '../../src/modules/imports/imports.service.js';
 import { buildTestApp, closeTestApp } from '../helpers/app.js';
 import { createUserAndLogin } from '../helpers/auth.js';
 import { multipartFile } from '../helpers/multipart.js';
@@ -14,13 +16,16 @@ describe('imports', () => {
     return app.inject({ method: 'POST', url: `/api/v1/imports/${entity}?dryRun=${dryRun}`, headers: { ...h, ...mp.headers }, payload: mp.payload });
   };
 
+  const lastImportAudit = (entityId: string) =>
+    app.db.collection(C.auditLog).findOne({ entity: 'import', entityId }, { sort: { at: -1 } });
+
   beforeAll(async () => {
     app = await buildTestApp();
     h = (await createUserAndLogin(app, ['planner'])).headers;
   });
   afterAll(async () => closeTestApp(app));
 
-  it('dry run reports creates without writing; real run writes', async () => {
+  it('dry run reports creates without writing; real run writes and audits the affected keys', async () => {
     const csv = 'code,name\nBKK,กรุงเทพ\nNE,อีสาน\n';
     const dry = await upload('zones', csv, true);
     expect(dry.statusCode).toBe(200);
@@ -29,9 +34,14 @@ describe('imports', () => {
     const real = await upload('zones', csv, false);
     expect(real.json()).toMatchObject({ dryRun: false, created: 2 });
     expect(await app.db.collection(C.zones).countDocuments()).toBe(2);
+    const createAudit = await lastImportAudit('zones');
+    expect(createAudit?.after).toMatchObject({ created: expect.arrayContaining(['BKK', 'NE']), updated: [] });
+
     const again = await upload('zones', 'code,name\nBKK,Bangkok\n', false);
     expect(again.json()).toMatchObject({ created: 0, updated: 1 });
     expect((await app.db.collection(C.zones).findOne({ code: 'BKK' }))?.name).toBe('Bangkok');
+    const updateAudit = await lastImportAudit('zones');
+    expect(updateAudit?.after).toMatchObject({ created: [], updated: ['BKK'] });
   });
 
   it('resolves codes to ids and reports unknown codes per row without saving anything', async () => {
@@ -62,8 +72,42 @@ describe('imports', () => {
     expect(dup.json().rows[2].errors[0]).toMatch(/duplicate/i);
   });
 
-  it('rejects unknown entities and missing files', async () => {
+  it('rejects unknown entities', async () => {
     const mp = multipartFile('x.csv', 'code,name\n', 'text/csv');
     expect((await app.inject({ method: 'POST', url: '/api/v1/imports/nope', headers: { ...h, ...mp.headers }, payload: mp.payload })).statusCode).toBe(400);
+  });
+
+  it('rejects a multipart request with no file part', async () => {
+    const boundary = `----test${randomUUID()}`;
+    const payload = Buffer.from(`--${boundary}--\r\n`);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/imports/zones?dryRun=true',
+      headers: { ...h, 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('FILE_REQUIRED');
+  });
+
+  it('rolls back the whole batch (bulk write + audit) when a write conflicts on a unique index', async () => {
+    const now = new Date();
+    const conflictingOps = [
+      { insertOne: { document: { code: 'DUPZ', name: 'First', active: true, createdAt: now, updatedAt: now } } },
+      { insertOne: { document: { code: 'DUPZ', name: 'Second', active: true, createdAt: now, updatedAt: now } } },
+    ];
+    await expect(
+      applyImportWrites(app.mongo, app.db, C.zones, conflictingOps, {
+        entity: 'import',
+        entityId: 'zones-rollback-test',
+        action: 'import',
+        by: 'tester',
+        after: { created: ['DUPZ', 'DUPZ'], updated: [] },
+      }),
+    ).rejects.toThrow();
+    // The first insertOne would have succeeded on its own; prove the transaction
+    // rolled it back together with the second (conflicting) one and the audit entry.
+    expect(await app.db.collection(C.zones).countDocuments({ code: 'DUPZ' })).toBe(0);
+    expect(await app.db.collection(C.auditLog).countDocuments({ entityId: 'zones-rollback-test' })).toBe(0);
   });
 });

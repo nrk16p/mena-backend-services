@@ -1,4 +1,4 @@
-import { ObjectId, type AnyBulkWriteOperation, type Db, type Document } from 'mongodb';
+import { ObjectId, type AnyBulkWriteOperation, type Db, type Document, type MongoClient } from 'mongodb';
 import { AppError, unprocessable } from '../../lib/errors.js';
 import { writeAudit } from '../../lib/audit.js';
 import { prepareDoc } from '../master/resource.js';
@@ -22,7 +22,33 @@ export interface ImportReport {
   rows: ImportRowResult[];
 }
 
+/**
+ * Runs the bulk write and its accompanying audit entry inside one MongoDB
+ * transaction, so a mid-batch failure (e.g. a unique-index conflict that
+ * only surfaces at write time) leaves no partial writes behind. Exported so
+ * the rollback behaviour can be exercised directly in tests with hand-built
+ * ops, independent of runImport's own row-level validation.
+ */
+export async function applyImportWrites(
+  mongo: MongoClient,
+  db: Db,
+  collection: string,
+  ops: AnyBulkWriteOperation<Document>[],
+  audit: { entity: string; entityId: string; action: string; by: string; after?: unknown },
+): Promise<void> {
+  const session = mongo.startSession();
+  try {
+    await session.withTransaction(async () => {
+      if (ops.length > 0) await db.collection(collection).bulkWrite(ops, { ordered: true, session });
+      await writeAudit(db, audit, { session });
+    });
+  } finally {
+    await session.endSession();
+  }
+}
+
 export async function runImport(
+  mongo: MongoClient,
   db: Db,
   entity: ImportEntity,
   rows: ParsedRow[],
@@ -97,7 +123,14 @@ export async function runImport(
 
   if (opts.dryRun) return report;
   if (report.errors > 0) throw unprocessable('IMPORT_HAS_ERRORS', `${report.errors} row(s) have errors; nothing was saved`, report);
-  if (ops.length > 0) await coll.bulkWrite(ops, { ordered: true });
-  await writeAudit(db, { entity: 'import', entityId: entity, action: 'import', by: opts.by, after: { created: report.created, updated: report.updated } });
+  const createdKeys = results.filter((r) => r.action === 'create').map((r) => r.key!);
+  const updatedKeys = results.filter((r) => r.action === 'update').map((r) => r.key!);
+  await applyImportWrites(mongo, db, spec.def.collection, ops, {
+    entity: 'import',
+    entityId: entity,
+    action: 'import',
+    by: opts.by,
+    after: { created: createdKeys, updated: updatedKeys },
+  });
   return report;
 }
