@@ -79,3 +79,11 @@ export async function createDo(app: App, f: PlanningFixtures, overrides: object 
   if (res.statusCode !== 201) throw new Error(`createDo → ${res.statusCode} ${res.body}`);
   return res.json();
 }
+
+export async function validate(app: App, f: PlanningFixtures, payload: object) {
+  const res = await app.inject({ method: 'POST', url: '/api/v1/shipments/validate', headers: f.planner, payload });
+  if (res.statusCode !== 200) throw new Error(`validate → ${res.statusCode} ${res.body}`);
+  return res.json() as { errors: { code: string; details?: unknown }[]; warnings: { code: string; details?: unknown }[]; stops: unknown[]; legs: { doIds: string[]; loaded: boolean }[] };
+}
+
+export const codes = (issues: { code: string }[]) => issues.map((i) => i.code).sort();

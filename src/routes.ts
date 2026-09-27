@@ -6,6 +6,7 @@ import { importRoutes } from './modules/imports/imports.routes.js';
 import { masterRoutes } from './modules/master/master.routes.js';
 import { orderRoutes } from './modules/orders/orders.routes.js';
 import { podTemplateRoutes } from './modules/pod-templates/pod-templates.routes.js';
+import { shipmentRoutes } from './modules/shipments/shipments.routes.js';
 import { userRoutes } from './modules/users/users.routes.js';
 
 export const apiRoutes: FastifyPluginAsyncZod = async (api) => {
@@ -17,4 +18,5 @@ export const apiRoutes: FastifyPluginAsyncZod = async (api) => {
   await api.register(podTemplateRoutes);
   await api.register(importRoutes);
   await api.register(blockRoutes);
+  await api.register(shipmentRoutes);
 };
