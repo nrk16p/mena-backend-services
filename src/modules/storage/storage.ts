@@ -222,5 +222,7 @@ export function createStorage(config: Config): Storage {
     bucket: config.SPACES_BUCKET!,
     key: config.SPACES_KEY!,
     secret: config.SPACES_SECRET!,
+    // Two attempts × the 10 s request limit: a stalled Spaces call fails in ~20 s instead of ~30 s.
+    maxAttempts: 2,
   });
 }

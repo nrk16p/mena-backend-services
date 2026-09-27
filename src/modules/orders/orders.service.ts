@@ -1,4 +1,4 @@
-import { ObjectId, type Db } from 'mongodb';
+import { ObjectId, type ClientSession, type Db } from 'mongodb';
 import { C } from '../../db/collections.js';
 import { type RefCheck, assertActiveRefs } from '../../lib/active-refs.js';
 import { unprocessable } from '../../lib/errors.js';
@@ -87,11 +87,12 @@ export async function updateDoIfUnchanged(
   db: Db,
   existing: DeliveryOrderDoc,
   set: Partial<DeliveryOrderDoc>,
+  session?: ClientSession,
 ): Promise<DeliveryOrderDoc | null> {
   return db.collection<DeliveryOrderDoc>(C.deliveryOrders).findOneAndUpdate(
     { _id: existing._id, status: existing.status, shipmentId: existing.shipmentId },
     { $set: set },
-    { returnDocument: 'after' },
+    { returnDocument: 'after', session },
   );
 }
 

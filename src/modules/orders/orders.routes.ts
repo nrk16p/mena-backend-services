@@ -49,8 +49,10 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
       updatedBy: by,
       updatedAt: now,
     } as DeliveryOrderDoc;
-    await coll().insertOne(doc);
-    await writeAudit(app.db, { entity: 'deliveryOrder', entityId: doc._id.toHexString(), action: 'create', by, after: toApi(doc) });
+    await withTransaction(app.mongo, async (session) => {
+      await coll().insertOne(doc, { session });
+      await writeAudit(app.db, { entity: 'deliveryOrder', entityId: doc._id.toHexString(), action: 'create', by, after: toApi(doc) }, { session });
+    });
     return reply.status(201).send({ ...toApi(doc), warnings: warnings.map((w) => ({ ...w, details: { doNo } })) });
   });
 
@@ -197,9 +199,12 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
       }
       const { set, warnings } = await prepareDoFields(app.db, req.body, existing);
       const by = actorOf(req);
-      const updated = await updateDoIfUnchanged(app.db, existing, { ...set, updatedBy: by, updatedAt: new Date() });
-      if (!updated) throw conflict('DO_CHANGED', 'The delivery order changed; reload and try again');
-      await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'update', by, before: toApi(existing), after: toApi(updated) });
+      const updated = await withTransaction(app.mongo, async (session) => {
+        const u = await updateDoIfUnchanged(app.db, existing, { ...set, updatedBy: by, updatedAt: new Date() }, session);
+        if (!u) throw conflict('DO_CHANGED', 'The delivery order changed; reload and try again');
+        await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'update', by, before: toApi(existing), after: toApi(u) }, { session });
+        return u;
+      });
       return { ...toApi(updated), warnings };
     },
   );
@@ -274,13 +279,16 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
       if (existing.shipmentId) throw unprocessable('DO_IN_SHIPMENT', 'Remove the delivery order from its shipment first');
       if (existing.status !== 'UNASSIGNED') throw unprocessable('DO_NOT_CANCELLABLE', `A ${existing.status} delivery order cannot be cancelled`);
       const by = actorOf(req);
-      const updated = await coll().findOneAndUpdate(
-        { _id: existing._id, status: 'UNASSIGNED', shipmentId: null },
-        { $set: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: req.body.reason, updatedBy: by, updatedAt: new Date() } },
-        { returnDocument: 'after' },
-      );
-      if (!updated) throw unprocessable('DO_NOT_CANCELLABLE', 'The delivery order changed; reload and try again');
-      await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'cancel', by, before: toApi(existing), after: toApi(updated) });
+      const updated = await withTransaction(app.mongo, async (session) => {
+        const u = await coll().findOneAndUpdate(
+          { _id: existing._id, status: 'UNASSIGNED', shipmentId: null },
+          { $set: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: req.body.reason, updatedBy: by, updatedAt: new Date() } },
+          { returnDocument: 'after', session },
+        );
+        if (!u) throw unprocessable('DO_NOT_CANCELLABLE', 'The delivery order changed; reload and try again');
+        await writeAudit(app.db, { entity: 'deliveryOrder', entityId: req.params.id, action: 'cancel', by, before: toApi(existing), after: toApi(u) }, { session });
+        return u;
+      });
       return toApi(updated);
     },
   );

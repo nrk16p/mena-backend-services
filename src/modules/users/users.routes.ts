@@ -10,6 +10,7 @@ import { hashPassword } from '../../lib/passwords.js';
 import { escapeRegex } from '../../lib/regex.js';
 import { ROLES, type Role } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
+import { withTransaction } from '../../lib/tx.js';
 import { revokeAllForUser } from '../auth/refresh-tokens.js';
 import { type UserDoc, createUser } from './users.repo.js';
 
@@ -38,8 +39,11 @@ const PatchUserBody = z.object({
   active: z.boolean().optional(),
 });
 
+/** Lock document every user PATCH writes first, so concurrent ones serialise (LAST_ADMIN). */
+const ADMIN_LOCK = 'lock:admins';
+
 const safeUser = (u: UserDoc) => {
-  const { passwordHash: _hidden, ...rest } = u;
+  const { passwordHash: _hidden, tokensValidAfter: _internal, ...rest } = u;
   return toApi(rest);
 };
 
@@ -88,8 +92,14 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post('/users', { schema: { tags: ['users'], body: CreateUserBody, response: { 201: UserItem } }, preHandler: admin }, async (req, reply) => {
     const driverId = req.body.driverId ? new ObjectId(req.body.driverId) : null;
     await assertDriverLink(app.db, req.body.roles, driverId, true, null);
-    const u = await createUser(app.db, { ...req.body, driverId });
-    await writeAudit(app.db, { entity: 'user', entityId: u._id.toHexString(), action: 'create', by: actorOf(req), after: safeUser(u) });
+    const by = actorOf(req);
+    // Hash before the transaction: a retried transaction must not pay for (or differ in) the hash.
+    const passwordHash = await hashPassword(req.body.password);
+    const u = await withTransaction(app.mongo, async (session) => {
+      const created = await createUser(app.db, { username: req.body.username, roles: req.body.roles, driverId, passwordHash }, { session });
+      await writeAudit(app.db, { entity: 'user', entityId: created._id.toHexString(), action: 'create', by, after: safeUser(created) }, { session });
+      return created;
+    });
     return reply.status(201).send(safeUser(u));
   });
 
@@ -103,21 +113,33 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     // Keep the link only on an active driver account; otherwise release it so the driver can be linked again.
     const driverId = requested !== undefined ? requested : roles.includes('driver') && willBeActive ? existing.driverId : null;
     await assertDriverLink(app.db, roles, driverId, willBeActive, _id);
-    const willBeAdmin = roles.includes('admin');
-    const wasActiveAdmin = existing.active && existing.roles.includes('admin');
-    if (wasActiveAdmin && !(willBeActive && willBeAdmin)) {
-      const otherActiveAdmins = await users().countDocuments({ _id: { $ne: _id }, active: true, roles: 'admin' }, { limit: 1 });
-      if (otherActiveAdmins === 0) {
+    // Write only what the request changes: `existing` was read outside the transaction, so writing its
+    // roles/active back could silently undo a concurrent change (e.g. a promotion to admin).
+    const set: Partial<UserDoc> = { updatedAt: new Date() };
+    if (req.body.roles !== undefined) set.roles = req.body.roles;
+    if (req.body.active !== undefined) set.active = req.body.active;
+    if (requested !== undefined) set.driverId = requested;
+    else if (req.body.active === false || (req.body.roles !== undefined && !req.body.roles.includes('driver'))) set.driverId = null;
+    if (req.body.password) set.passwordHash = await hashPassword(req.body.password);
+    const by = actorOf(req);
+    const locks = app.db.collection<{ _id: string; seq: number }>(C.counters);
+    // Create the lock document outside the transaction: an upsert inside two concurrent transactions
+    // would race on the insert instead of conflicting on one existing document.
+    await locks.updateOne({ _id: ADMIN_LOCK }, { $setOnInsert: { seq: 0 } }, { upsert: true });
+    const updated = await withTransaction(app.mongo, async (session) => {
+      // Every PATCH writes the same lock document first, so concurrent ones conflict and MongoDB retries
+      // the loser, which then counts the winner's change. This does not trust `existing`: any PATCH may
+      // be the one that removes the last active admin.
+      await locks.updateOne({ _id: ADMIN_LOCK }, { $inc: { seq: 1 } }, { session });
+      const u = await users().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after', session });
+      if (!u) throw notFound('User');
+      if ((await users().countDocuments({ active: true, roles: 'admin' }, { session, limit: 1 })) === 0) {
         throw unprocessable('LAST_ADMIN', 'Cannot deactivate or demote the last active admin');
       }
-    }
-    const set: Partial<UserDoc> = { roles, driverId, updatedAt: new Date() };
-    if (req.body.active !== undefined) set.active = req.body.active;
-    if (req.body.password) set.passwordHash = await hashPassword(req.body.password);
-    const updated = await users().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after' });
-    if (!updated) throw notFound('User');
-    if (req.body.password || req.body.active === false) await revokeAllForUser(app.db, _id);
-    await writeAudit(app.db, { entity: 'user', entityId: req.params.id, action: 'update', by: actorOf(req), before: safeUser(existing), after: safeUser(updated) });
+      if (req.body.password || req.body.active === false) await revokeAllForUser(app.db, _id, session);
+      await writeAudit(app.db, { entity: 'user', entityId: req.params.id, action: 'update', by, before: safeUser(existing), after: safeUser(u) }, { session });
+      return u;
+    });
     return safeUser(updated);
   });
 };

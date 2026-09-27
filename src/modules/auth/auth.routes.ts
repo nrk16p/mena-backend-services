@@ -5,9 +5,10 @@ import { C } from '../../db/collections.js';
 import { actorOf, writeAudit } from '../../lib/audit.js';
 import { AppError, unauthorized } from '../../lib/errors.js';
 import { dummyHash, hashPassword, verifyPassword } from '../../lib/passwords.js';
+import { withTransaction } from '../../lib/tx.js';
 import { UserOutSchema, findUserById, findUserByUsername, userOut } from '../users/users.repo.js';
 import { TokenResponseSchema, issueTokens } from './auth.service.js';
-import { revokeAllForUser, revokeRefreshToken, rotateRefreshToken } from './refresh-tokens.js';
+import { assertFamilyCurrent, revokeAllForUser, revokeRefreshToken, rotateRefreshToken } from './refresh-tokens.js';
 
 const LoginBody = z.object({
   username: z.string().trim().min(1),
@@ -72,6 +73,7 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
       const { userId, familyId } = await rotateRefreshToken(app.db, req.body.refreshToken, app.config.REFRESH_REUSE_GRACE_SEC);
       const user = await findUserById(app.db, userId);
       if (!user || !user.active) throw new AppError(401, 'USER_INACTIVE', 'User is inactive');
+      await assertFamilyCurrent(app.db, userId, familyId, user.tokensValidAfter);
       return issueTokens(app, user, familyId);
     },
   );
@@ -97,15 +99,11 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
       if (!(await verifyPassword(user.passwordHash, req.body.currentPassword))) {
         throw new AppError(422, 'INVALID_CURRENT_PASSWORD', 'Current password is incorrect');
       }
-      await app.db
-        .collection(C.users)
-        .updateOne({ _id: user._id }, { $set: { passwordHash: await hashPassword(req.body.newPassword), updatedAt: new Date() } });
-      await revokeAllForUser(app.db, user._id);
-      await writeAudit(app.db, {
-        entity: 'user',
-        entityId: user._id.toHexString(),
-        action: 'password-change',
-        by: actorOf(req),
+      const passwordHash = await hashPassword(req.body.newPassword);
+      await withTransaction(app.mongo, async (session) => {
+        await app.db.collection(C.users).updateOne({ _id: user._id }, { $set: { passwordHash, updatedAt: new Date() } }, { session });
+        await revokeAllForUser(app.db, user._id, session);
+        await writeAudit(app.db, { entity: 'user', entityId: user._id.toHexString(), action: 'password-change', by: actorOf(req) }, { session });
       });
       return reply.status(204).send();
     },
