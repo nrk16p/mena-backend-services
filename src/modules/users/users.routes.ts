@@ -39,11 +39,11 @@ const PatchUserBody = z.object({
   active: z.boolean().optional(),
 });
 
-/** Lock document every admin demotion/deactivation writes first, so concurrent ones serialise (LAST_ADMIN). */
+/** Lock document every user PATCH writes first, so concurrent ones serialise (LAST_ADMIN). */
 const ADMIN_LOCK = 'lock:admins';
 
 const safeUser = (u: UserDoc) => {
-  const { passwordHash: _hidden, ...rest } = u;
+  const { passwordHash: _hidden, tokensValidAfter: _internal, ...rest } = u;
   return toApi(rest);
 };
 
@@ -93,8 +93,10 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     const driverId = req.body.driverId ? new ObjectId(req.body.driverId) : null;
     await assertDriverLink(app.db, req.body.roles, driverId, true, null);
     const by = actorOf(req);
+    // Hash before the transaction: a retried transaction must not pay for (or differ in) the hash.
+    const passwordHash = await hashPassword(req.body.password);
     const u = await withTransaction(app.mongo, async (session) => {
-      const created = await createUser(app.db, { ...req.body, driverId }, { session });
+      const created = await createUser(app.db, { username: req.body.username, roles: req.body.roles, driverId, passwordHash }, { session });
       await writeAudit(app.db, { entity: 'user', entityId: created._id.toHexString(), action: 'create', by, after: safeUser(created) }, { session });
       return created;
     });
@@ -111,22 +113,27 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     // Keep the link only on an active driver account; otherwise release it so the driver can be linked again.
     const driverId = requested !== undefined ? requested : roles.includes('driver') && willBeActive ? existing.driverId : null;
     await assertDriverLink(app.db, roles, driverId, willBeActive, _id);
-    const losesAdmin = existing.active && existing.roles.includes('admin') && !(willBeActive && roles.includes('admin'));
-    const set: Partial<UserDoc> = { roles, driverId, updatedAt: new Date() };
+    // Write only what the request changes: `existing` was read outside the transaction, so writing its
+    // roles/active back could silently undo a concurrent change (e.g. a promotion to admin).
+    const set: Partial<UserDoc> = { updatedAt: new Date() };
+    if (req.body.roles !== undefined) set.roles = req.body.roles;
     if (req.body.active !== undefined) set.active = req.body.active;
+    if (requested !== undefined) set.driverId = requested;
+    else if (req.body.active === false || (req.body.roles !== undefined && !req.body.roles.includes('driver'))) set.driverId = null;
     if (req.body.password) set.passwordHash = await hashPassword(req.body.password);
     const by = actorOf(req);
     const locks = app.db.collection<{ _id: string; seq: number }>(C.counters);
     // Create the lock document outside the transaction: an upsert inside two concurrent transactions
     // would race on the insert instead of conflicting on one existing document.
-    if (losesAdmin) await locks.updateOne({ _id: ADMIN_LOCK }, { $setOnInsert: { seq: 0 } }, { upsert: true });
+    await locks.updateOne({ _id: ADMIN_LOCK }, { $setOnInsert: { seq: 0 } }, { upsert: true });
     const updated = await withTransaction(app.mongo, async (session) => {
-      // Every demotion/deactivation of an admin writes the same lock document first, so concurrent
-      // ones conflict and MongoDB retries the loser, which then counts the winner's change.
-      if (losesAdmin) await locks.updateOne({ _id: ADMIN_LOCK }, { $inc: { seq: 1 } }, { session });
+      // Every PATCH writes the same lock document first, so concurrent ones conflict and MongoDB retries
+      // the loser, which then counts the winner's change. This does not trust `existing`: any PATCH may
+      // be the one that removes the last active admin.
+      await locks.updateOne({ _id: ADMIN_LOCK }, { $inc: { seq: 1 } }, { session });
       const u = await users().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after', session });
       if (!u) throw notFound('User');
-      if (losesAdmin && (await users().countDocuments({ active: true, roles: 'admin' }, { session, limit: 1 })) === 0) {
+      if ((await users().countDocuments({ active: true, roles: 'admin' }, { session, limit: 1 })) === 0) {
         throw unprocessable('LAST_ADMIN', 'Cannot deactivate or demote the last active admin');
       }
       if (req.body.password || req.body.active === false) await revokeAllForUser(app.db, _id, session);

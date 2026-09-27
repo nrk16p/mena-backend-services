@@ -1,5 +1,5 @@
-import { ObjectId } from 'mongodb';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Collection, ObjectId } from 'mongodb';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
 import { issueRefreshToken, revokeRefreshToken } from '../../src/modules/auth/refresh-tokens.js';
@@ -67,6 +67,51 @@ describe('concurrency guards', () => {
       expect(await app.db.collection(C.users).countDocuments({ active: true, roles: 'admin' })).toBe(1);
       if (self.statusCode === 200) keeper = other;
     }
+  });
+
+  /**
+   * Runs `during` right after the PATCH handler's pre-transaction read of `userId`, so the handler
+   * works from a stale snapshot of that user (a deterministic stand-in for a concurrent request).
+   */
+  const afterStaleRead = (userId: ObjectId, during: () => Promise<unknown>) => {
+    const original = Collection.prototype.findOne;
+    let fired = false;
+    vi.spyOn(Collection.prototype, 'findOne').mockImplementation(async function (this: Collection, ...args: unknown[]) {
+      const result = await (original as (...a: unknown[]) => Promise<unknown>).apply(this, args);
+      const filter = args[0] as { _id?: unknown } | undefined;
+      if (!fired && this.collectionName === C.users && filter?._id instanceof ObjectId && filter._id.equals(userId) && Object.keys(filter).length === 1) {
+        fired = true;
+        await during();
+      }
+      return result;
+    } as never);
+  };
+  afterEach(() => vi.restoreAllMocks());
+
+  it('a PATCH that does not mention roles never writes back stale roles over a concurrent promotion', async () => {
+    const keeper = await createUserAndLogin(app, ['admin']);
+    const target = await createUserAndLogin(app, ['viewer']);
+    afterStaleRead(target.user._id, () => app.db.collection(C.users).updateOne({ _id: target.user._id }, { $set: { roles: ['admin'] } }));
+    const res = await app.inject({ method: 'PATCH', url: `/api/v1/users/${target.user._id.toHexString()}`, headers: keeper.headers, payload: { password: 'Brand-new-77' } });
+    expect(res.statusCode).toBe(200);
+    expect((await app.db.collection(C.users).findOne({ _id: target.user._id }))?.roles).toEqual(['admin']);
+  });
+
+  it('counts admins inside the transaction on every PATCH, not only when a stale read says an admin is lost', async () => {
+    const keeper = await createUserAndLogin(app, ['admin']);
+    const target = await createUserAndLogin(app, ['admin']);
+    await app.db.collection(C.users).updateMany({ _id: { $ne: keeper.user._id }, roles: 'admin' }, { $set: { roles: ['viewer'] } });
+    await app.db.collection(C.users).updateOne({ _id: target.user._id }, { $set: { roles: ['admin'], active: false } });
+    // The handler reads the target as an inactive admin (so deactivating it looks harmless); meanwhile
+    // it is re-activated and the keeper steps down, leaving the target as the only active admin.
+    afterStaleRead(target.user._id, async () => {
+      await app.db.collection(C.users).updateOne({ _id: target.user._id }, { $set: { active: true } });
+      await app.db.collection(C.users).updateOne({ _id: keeper.user._id }, { $set: { roles: ['viewer'] } });
+    });
+    const res = await app.inject({ method: 'PATCH', url: `/api/v1/users/${target.user._id.toHexString()}`, headers: keeper.headers, payload: { active: false } });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().code).toBe('LAST_ADMIN');
+    expect(await app.db.collection(C.users).countDocuments({ active: true, roles: 'admin' })).toBe(1);
   });
 
   it('never lets a refresh token issued during a family revoke survive it', async () => {

@@ -2,6 +2,7 @@ import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
+import { issueRefreshToken, revokeAllForUser } from '../../src/modules/auth/refresh-tokens.js';
 import { buildTestApp, closeTestApp } from '../helpers/app.js';
 import { TEST_PASSWORD, createUserAndLogin } from '../helpers/auth.js';
 
@@ -99,6 +100,42 @@ describe('refresh tokens (default 30 s reuse grace)', () => {
     const allEntriesForUser = await app.db.collection(C.auditLog).find({ entityId: user._id.toHexString() }).toArray();
     expect(allEntriesForUser).toHaveLength(1);
     expect(allEntriesForUser[0].by).toBe(user.username);
+  });
+});
+
+describe('refresh re-checks the user', () => {
+  let app: App;
+  beforeAll(async () => {
+    app = await buildTestApp();
+  });
+  afterAll(async () => closeTestApp(app));
+
+  it('rejects a family issued before the last revoke-all even if its tokens escaped the revoke (phantom family)', async () => {
+    const { user } = await createUserAndLogin(app, ['planner']);
+    await revokeAllForUser(app.db, user._id);
+    const cutoff = (await app.db.collection(C.users).findOne({ _id: user._id }))?.tokensValidAfter as Date;
+    expect(cutoff).toBeInstanceOf(Date);
+    // A login that raced the revoke: its family was created before the cutoff but committed after it,
+    // so the revoke's snapshot never saw it and its token is still live.
+    const phantom = await issueRefreshToken(app.db, user._id, 1);
+    const familyId = (await app.db.collection(C.refreshTokens).findOne({ _id: new ObjectId(phantom.split('.')[0]) }))!.familyId;
+    await app.db.collection(C.refreshFamilies).updateOne({ _id: familyId }, { $set: { createdAt: new Date(cutoff.getTime() - 5) } });
+    const res = await refresh(app, phantom);
+    expect(res.statusCode).toBe(401);
+    expect(res.json().code).toBe('INVALID_REFRESH_TOKEN');
+  });
+
+  it('accepts a family issued after the last revoke-all', async () => {
+    const { user } = await createUserAndLogin(app, ['planner']);
+    await revokeAllForUser(app.db, user._id);
+    const login = await app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username: user.username, password: TEST_PASSWORD } });
+    expect((await refresh(app, login.json().refreshToken)).statusCode).toBe(200);
+  });
+
+  it('rejects a refresh for a deactivated user', async () => {
+    const { user, refreshToken } = await createUserAndLogin(app, ['planner']);
+    await app.db.collection(C.users).updateOne({ _id: user._id }, { $set: { active: false } });
+    expect((await refresh(app, refreshToken)).statusCode).toBe(401);
   });
 });
 

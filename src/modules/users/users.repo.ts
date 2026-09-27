@@ -14,6 +14,8 @@ export interface UserDoc {
   lastLogin: { at: Date; lat: number | null; lng: number | null } | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Set by revokeAllForUser (server clock): refresh families created at or before it are rejected. */
+  tokensValidAfter?: Date;
 }
 
 export const UserOutSchema = z.object({
@@ -23,15 +25,17 @@ export const UserOutSchema = z.object({
   driverId: z.string().nullable(),
 });
 
-export async function createUser(
-  db: Db,
-  input: { username: string; password: string; roles: Role[]; driverId?: ObjectId | null },
-  opts: { session?: ClientSession } = {},
-): Promise<UserDoc> {
+export type NewUserInput = { username: string; roles: Role[]; driverId?: ObjectId | null } & ({ password: string } | { passwordHash: string });
+
+/**
+ * Inserts a user. Pass `passwordHash` (hashed before the transaction) when calling inside
+ * `withTransaction`, so a retried transaction does not hash again.
+ */
+export async function createUser(db: Db, input: NewUserInput, opts: { session?: ClientSession } = {}): Promise<UserDoc> {
   const now = new Date();
   const doc: Omit<UserDoc, '_id'> = {
     username: input.username.trim(),
-    passwordHash: await hashPassword(input.password),
+    passwordHash: 'passwordHash' in input ? input.passwordHash : await hashPassword(input.password),
     roles: input.roles,
     driverId: input.driverId ?? null,
     active: true,

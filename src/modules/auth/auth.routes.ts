@@ -8,7 +8,7 @@ import { dummyHash, hashPassword, verifyPassword } from '../../lib/passwords.js'
 import { withTransaction } from '../../lib/tx.js';
 import { UserOutSchema, findUserById, findUserByUsername, userOut } from '../users/users.repo.js';
 import { TokenResponseSchema, issueTokens } from './auth.service.js';
-import { revokeAllForUser, revokeRefreshToken, rotateRefreshToken } from './refresh-tokens.js';
+import { assertFamilyCurrent, revokeAllForUser, revokeRefreshToken, rotateRefreshToken } from './refresh-tokens.js';
 
 const LoginBody = z.object({
   username: z.string().trim().min(1),
@@ -73,6 +73,7 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
       const { userId, familyId } = await rotateRefreshToken(app.db, req.body.refreshToken, app.config.REFRESH_REUSE_GRACE_SEC);
       const user = await findUserById(app.db, userId);
       if (!user || !user.active) throw new AppError(401, 'USER_INACTIVE', 'User is inactive');
+      await assertFamilyCurrent(app.db, userId, familyId, user.tokensValidAfter);
       return issueTokens(app, user, familyId);
     },
   );

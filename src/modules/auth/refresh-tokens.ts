@@ -23,7 +23,12 @@ export interface RefreshFamilyDoc {
   expiresAt: Date;
   /** Bumped by every issue and revoke so each one really writes the document (a no-op update takes no write lock). */
   version: number;
+  /** Server clock ($$NOW) at the family's first issue; compared with the user's `tokensValidAfter` on refresh. */
+  createdAt?: Date;
 }
+
+const isDuplicateId = (e: unknown) =>
+  (e as { code?: unknown }).code === 11000 && !!(e as { keyPattern?: Record<string, unknown> }).keyPattern?._id;
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -37,21 +42,42 @@ export async function issueRefreshToken(
   const secret = randomBytes(32).toString('base64url');
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlDays * 86_400_000);
-  await withTransaction(db.client, async (session) => {
-    // Compare-and-set on the family document: a concurrent revoke either commits first (and this
-    // token is born revoked) or conflicts with this write and is retried after it (and revokes it).
-    // `$inc` guarantees a real write: `$max` alone is a no-op when the family already outlives this
-    // token, and a no-op update does not conflict with the revoke.
-    const family = await db.collection<RefreshFamilyDoc>(C.refreshFamilies).findOneAndUpdate(
-      { _id: familyId },
-      { $setOnInsert: { userId, revokedAt: null }, $max: { expiresAt }, $inc: { version: 1 } },
-      { upsert: true, returnDocument: 'after', session },
-    );
-    await db.collection<RefreshTokenDoc>(C.refreshTokens).insertOne(
-      { _id, userId, familyId, tokenHash: sha256(secret), expiresAt, createdAt: now, replacedAt: null, revokedAt: family?.revokedAt ? now : null },
-      { session },
-    );
-  });
+  const run = () =>
+    withTransaction(db.client, async (session) => {
+      // Compare-and-set on the family document: a concurrent revoke either commits first (and this
+      // token is born revoked) or conflicts with this write and is retried after it (and revokes it).
+      // The version bump guarantees a real write: `$max` alone is a no-op when the family already
+      // outlives this token, and a no-op update does not conflict with the revoke. `createdAt` is the
+      // server clock, set only when this upsert inserts the family, so it compares with the server-clock
+      // `tokensValidAfter` that revokeAllForUser writes regardless of app-instance clock skew.
+      const family = await db.collection<RefreshFamilyDoc>(C.refreshFamilies).findOneAndUpdate(
+        { _id: familyId },
+        [
+          {
+            $set: {
+              createdAt: { $cond: [{ $eq: [{ $type: '$userId' }, 'missing'] }, '$$NOW', '$createdAt'] },
+              userId: { $ifNull: ['$userId', userId] },
+              revokedAt: { $ifNull: ['$revokedAt', null] },
+              expiresAt: { $max: ['$expiresAt', expiresAt] },
+              version: { $add: [{ $ifNull: ['$version', 0] }, 1] },
+            },
+          },
+        ],
+        { upsert: true, returnDocument: 'after', session },
+      );
+      await db.collection<RefreshTokenDoc>(C.refreshTokens).insertOne(
+        { _id, userId, familyId, tokenHash: sha256(secret), expiresAt, createdAt: now, replacedAt: null, revokedAt: family?.revokedAt ? now : null },
+        { session },
+      );
+    });
+  try {
+    await run();
+  } catch (e) {
+    // Two first issues of one family can race on the upsert's insert; the loser sees the winner's
+    // document on a second try.
+    if (!isDuplicateId(e)) throw e;
+    await run();
+  }
   return `${_id.toHexString()}.${secret}`;
 }
 
@@ -152,8 +178,23 @@ export async function revokeRefreshToken(db: Db, token: string): Promise<void> {
   if (doc && hashMatches(doc.tokenHash, parsed.secret)) await revokeFamily(db, doc);
 }
 
+/**
+ * Rejects a refresh whose family was created at or before the user's last revoke-all (password
+ * change, deactivation). A login racing the revoke can insert a family the revoke's snapshot never
+ * saw ("phantom family"); this check closes that gap without locking. The family is revoked too.
+ */
+export async function assertFamilyCurrent(db: Db, userId: ObjectId, familyId: ObjectId, tokensValidAfter: Date | undefined): Promise<void> {
+  if (!tokensValidAfter) return;
+  const family = await db.collection<RefreshFamilyDoc>(C.refreshFamilies).findOne({ _id: familyId });
+  if (family?.createdAt && family.createdAt > tokensValidAfter) return;
+  await revokeFamily(db, { familyId, userId, expiresAt: family?.expiresAt ?? new Date() });
+  throw invalid();
+}
+
 /** Revokes every session of a user (password change, deactivation); pass the caller's session to commit with it. */
 export async function revokeAllForUser(db: Db, userId: ObjectId, session?: ClientSession): Promise<void> {
+  // Server clock, written first: families created at or before it are refused on refresh (assertFamilyCurrent).
+  await db.collection(C.users).updateOne({ _id: userId }, [{ $set: { tokensValidAfter: '$$NOW' } }], { session });
   const now = new Date();
   await db
     .collection<RefreshFamilyDoc>(C.refreshFamilies)
