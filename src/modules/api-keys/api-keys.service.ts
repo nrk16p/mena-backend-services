@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { ObjectId, type Db } from 'mongodb';
+import { ObjectId, type ClientSession, type Db } from 'mongodb';
 import { C } from '../../db/collections.js';
 import type { ApiKeyPrincipal } from '../../lib/principal.js';
 
@@ -23,6 +23,7 @@ export async function createApiKey(
   db: Db,
   pepper: string,
   input: { name: string; scopes: ApiKeyScope[]; createdBy: string },
+  opts: { session?: ClientSession } = {},
 ): Promise<{ doc: ApiKeyDoc; key: string }> {
   const _id = new ObjectId();
   const secret = randomBytes(24).toString('base64url');
@@ -36,7 +37,7 @@ export async function createApiKey(
     createdAt: new Date(),
     createdBy: input.createdBy,
   };
-  await db.collection<ApiKeyDoc>(C.apiKeys).insertOne(doc);
+  await db.collection<ApiKeyDoc>(C.apiKeys).insertOne(doc, { session: opts.session });
   return { doc, key: `mk_${_id.toHexString()}_${secret}` };
 }
 

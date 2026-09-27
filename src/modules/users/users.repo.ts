@@ -1,4 +1,4 @@
-import type { Db, ObjectId } from 'mongodb';
+import type { ClientSession, Db, ObjectId } from 'mongodb';
 import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { hashPassword } from '../../lib/passwords.js';
@@ -26,6 +26,7 @@ export const UserOutSchema = z.object({
 export async function createUser(
   db: Db,
   input: { username: string; password: string; roles: Role[]; driverId?: ObjectId | null },
+  opts: { session?: ClientSession } = {},
 ): Promise<UserDoc> {
   const now = new Date();
   const doc: Omit<UserDoc, '_id'> = {
@@ -38,7 +39,7 @@ export async function createUser(
     createdAt: now,
     updatedAt: now,
   };
-  const res = await db.collection<UserDoc>(C.users).insertOne(doc as UserDoc);
+  const res = await db.collection<UserDoc>(C.users).insertOne({ ...doc } as UserDoc, { session: opts.session });
   return { ...doc, _id: res.insertedId };
 }
 

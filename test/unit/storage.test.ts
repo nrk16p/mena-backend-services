@@ -5,7 +5,8 @@ import { Readable } from 'node:stream';
 import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { canonicalJson, sha256Hex } from '../../src/lib/canonical.js';
-import { MemoryStorage, S3Storage, deriveLocalUploadKey, sha256OfStream, signLocal, verifyLocalSignature } from '../../src/modules/storage/storage.js';
+import { loadConfig } from '../../src/config.js';
+import { MemoryStorage, S3Storage, createStorage, deriveLocalUploadKey, sha256OfStream, signLocal, verifyLocalSignature } from '../../src/modules/storage/storage.js';
 
 describe('canonical hashing', () => {
   it('sorts keys recursively so equal objects hash equally', () => {
@@ -191,5 +192,24 @@ describe('S3Storage', () => {
     expect(put).toContain('X-Amz-Signature=');
     expect(put).not.toMatch(/x-amz-checksum|x-amz-sdk-checksum/i);
     expect(await s.presignGet('pods/a/b/c.jpg', 300)).toContain('X-Amz-Expires=300');
+  });
+
+  it('createStorage caps Spaces calls at 2 attempts so a stalled call fails in ~20 s, not ~30 s', async () => {
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      JWT_SECRET: 'test-secret-test-secret-test-secret-0000',
+      API_KEY_PEPPER: 'test-pepper-000000',
+      MONGO_URI: 'mongodb://localhost:27017',
+      MONGO_DB: 'unused',
+      STORAGE_DRIVER: 's3',
+      SPACES_ENDPOINT: 'https://sgp1.digitaloceanspaces.com',
+      SPACES_BUCKET: 'mena-pod',
+      SPACES_KEY: 'AKIA',
+      SPACES_SECRET: 'secret',
+    });
+    const s = createStorage(config);
+    expect(s).toBeInstanceOf(S3Storage);
+    const client = (s as unknown as { client: { config: { maxAttempts: () => Promise<number> } } }).client;
+    expect(await client.config.maxAttempts()).toBe(2);
   });
 });

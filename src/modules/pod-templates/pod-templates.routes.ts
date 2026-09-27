@@ -8,6 +8,7 @@ import { IdParams, objectIdString } from '../../lib/ids.js';
 import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
+import { withTransaction } from '../../lib/tx.js';
 import { CreatePodTemplateBody, PatchPodTemplateBody, PodTemplateItem } from './pod-templates.schemas.js';
 import type { PodTemplateDoc } from './pod-templates.service.js';
 
@@ -66,22 +67,28 @@ export const podTemplateRoutes: FastifyPluginAsyncZod = async (app) => {
       extraSteps: req.body.extraSteps, fields: req.body.fields,
       publishedAt: null, publishedBy: null, createdAt: now, updatedAt: now, createdBy: by,
     };
-    const res = await coll().insertOne(doc as PodTemplateDoc);
-    const saved = { ...doc, _id: res.insertedId };
-    await writeAudit(app.db, { entity: 'podTemplate', entityId: res.insertedId.toHexString(), action: 'create', by, after: toApi(saved) });
+    const saved = await withTransaction(app.mongo, async (session) => {
+      const res = await coll().insertOne({ ...doc } as PodTemplateDoc, { session });
+      const created = { ...doc, _id: res.insertedId };
+      await writeAudit(app.db, { entity: 'podTemplate', entityId: res.insertedId.toHexString(), action: 'create', by, after: toApi(created) }, { session });
+      return created;
+    });
     return reply.status(201).send(toApi(saved));
   });
 
   app.patch('/pod-templates/:id', { schema: { tags: ['pod-templates'], params: IdParams, body: PatchPodTemplateBody, response: { 200: PodTemplateItem } }, preHandler: write }, async (req) => {
     const existing = await load(req.params.id);
     if (existing.status === 'published') throw published();
-    const updated = await coll().findOneAndUpdate(
-      { _id: existing._id, status: 'draft' },
-      { $set: { ...req.body, updatedAt: new Date() } },
-      { returnDocument: 'after' },
-    );
-    if (!updated) throw published();
-    await writeAudit(app.db, { entity: 'podTemplate', entityId: req.params.id, action: 'update', by: actorOf(req), before: toApi(existing), after: toApi(updated) });
+    const updated = await withTransaction(app.mongo, async (session) => {
+      const u = await coll().findOneAndUpdate(
+        { _id: existing._id, status: 'draft' },
+        { $set: { ...req.body, updatedAt: new Date() } },
+        { returnDocument: 'after', session },
+      );
+      if (!u) throw published();
+      await writeAudit(app.db, { entity: 'podTemplate', entityId: req.params.id, action: 'update', by: actorOf(req), before: toApi(existing), after: toApi(u) }, { session });
+      return u;
+    });
     return toApi(updated);
   });
 
@@ -94,13 +101,16 @@ export const podTemplateRoutes: FastifyPluginAsyncZod = async (app) => {
       .limit(1)
       .next();
     const by = actorOf(req);
-    const updated = await coll().findOneAndUpdate(
-      { _id: draft._id, status: 'draft' },
-      { $set: { status: 'published', version: (last?.version ?? 0) + 1, publishedAt: new Date(), publishedBy: by, updatedAt: new Date() } },
-      { returnDocument: 'after' },
-    );
-    if (!updated) throw published();
-    await writeAudit(app.db, { entity: 'podTemplate', entityId: req.params.id, action: 'publish', by, after: toApi(updated) });
+    const updated = await withTransaction(app.mongo, async (session) => {
+      const u = await coll().findOneAndUpdate(
+        { _id: draft._id, status: 'draft' },
+        { $set: { status: 'published', version: (last?.version ?? 0) + 1, publishedAt: new Date(), publishedBy: by, updatedAt: new Date() } },
+        { returnDocument: 'after', session },
+      );
+      if (!u) throw published();
+      await writeAudit(app.db, { entity: 'podTemplate', entityId: req.params.id, action: 'publish', by, after: toApi(u) }, { session });
+      return u;
+    });
     return toApi(updated);
   });
 
@@ -112,9 +122,11 @@ export const podTemplateRoutes: FastifyPluginAsyncZod = async (app) => {
     const doc: Omit<PodTemplateDoc, '_id'> = {
       ...rest, status: 'draft', version: null, publishedAt: null, publishedBy: null, createdAt: now, updatedAt: now, createdBy: by,
     };
-    const res = await coll().insertOne(doc as PodTemplateDoc);
-    const saved = { ...doc, _id: res.insertedId };
-    await writeAudit(app.db, { entity: 'podTemplate', entityId: res.insertedId.toHexString(), action: 'clone', by, after: { from: req.params.id } });
+    const saved = await withTransaction(app.mongo, async (session) => {
+      const res = await coll().insertOne({ ...doc } as PodTemplateDoc, { session });
+      await writeAudit(app.db, { entity: 'podTemplate', entityId: res.insertedId.toHexString(), action: 'clone', by, after: { from: req.params.id } }, { session });
+      return { ...doc, _id: res.insertedId };
+    });
     return reply.status(201).send(toApi(saved));
   });
 };

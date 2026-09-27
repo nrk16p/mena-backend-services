@@ -9,6 +9,7 @@ import { IssueSchema } from '../../lib/issues.js';
 import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
+import { withTransaction } from '../../lib/tx.js';
 import { type BlockDoc, RESOURCE_TYPES, prepareBlock } from './blocks.service.js';
 import { LEVEL1 } from './status-codes.js';
 
@@ -69,8 +70,10 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
         _id: new ObjectId(), ...b, level1, blocksAssignment, source: 'manual', cancelledAt: null,
         createdBy: by, createdAt: now, updatedBy: by, updatedAt: now,
       };
-      await coll().insertOne(doc);
-      await writeAudit(app.db, { entity: 'resourceBlock', entityId: doc._id.toHexString(), action: 'create', by, after: toApi(doc) });
+      await withTransaction(app.mongo, async (session) => {
+        await coll().insertOne(doc, { session });
+        await writeAudit(app.db, { entity: 'resourceBlock', entityId: doc._id.toHexString(), action: 'create', by, after: toApi(doc) }, { session });
+      });
       return reply.status(201).send({ ...toApi(doc), warnings });
     },
   );
@@ -134,9 +137,12 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
       const by = actorOf(req);
       const set: Partial<BlockDoc> = { ...merged, level1, blocksAssignment, updatedBy: by, updatedAt: new Date() };
       if (req.body.note !== undefined) set.note = req.body.note;
-      const updated = await coll().findOneAndUpdate({ _id: existing._id, cancelledAt: null }, { $set: set }, { returnDocument: 'after' });
-      if (!updated) throw unprocessable('BLOCK_CANCELLED', 'A cancelled block cannot be changed');
-      await writeAudit(app.db, { entity: 'resourceBlock', entityId: req.params.id, action: 'update', by, before: toApi(existing), after: toApi(updated) });
+      const updated = await withTransaction(app.mongo, async (session) => {
+        const u = await coll().findOneAndUpdate({ _id: existing._id, cancelledAt: null }, { $set: set }, { returnDocument: 'after', session });
+        if (!u) throw unprocessable('BLOCK_CANCELLED', 'A cancelled block cannot be changed');
+        await writeAudit(app.db, { entity: 'resourceBlock', entityId: req.params.id, action: 'update', by, before: toApi(existing), after: toApi(u) }, { session });
+        return u;
+      });
       return { ...toApi(updated), warnings };
     },
   );
@@ -145,13 +151,16 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
     const existing = await load(req.params.id);
     if (existing.cancelledAt) throw unprocessable('BLOCK_CANCELLED', 'The block is already cancelled');
     const by = actorOf(req);
-    const updated = await coll().findOneAndUpdate(
-      { _id: existing._id, cancelledAt: null },
-      { $set: { cancelledAt: new Date(), updatedBy: by, updatedAt: new Date() } },
-      { returnDocument: 'after' },
-    );
-    if (!updated) throw unprocessable('BLOCK_CANCELLED', 'The block is already cancelled');
-    await writeAudit(app.db, { entity: 'resourceBlock', entityId: req.params.id, action: 'cancel', by, before: toApi(existing), after: toApi(updated) });
+    const updated = await withTransaction(app.mongo, async (session) => {
+      const u = await coll().findOneAndUpdate(
+        { _id: existing._id, cancelledAt: null },
+        { $set: { cancelledAt: new Date(), updatedBy: by, updatedAt: new Date() } },
+        { returnDocument: 'after', session },
+      );
+      if (!u) throw unprocessable('BLOCK_CANCELLED', 'The block is already cancelled');
+      await writeAudit(app.db, { entity: 'resourceBlock', entityId: req.params.id, action: 'cancel', by, before: toApi(existing), after: toApi(u) }, { session });
+      return u;
+    });
     return toApi(updated);
   });
 };

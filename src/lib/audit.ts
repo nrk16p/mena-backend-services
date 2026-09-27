@@ -11,8 +11,9 @@ export function actorOf(req: FastifyRequest): string {
 export async function writeAudit(
   db: Db,
   entry: { entity: string; entityId: string; action: string; by: string; before?: unknown; after?: unknown },
-  opts?: { session?: ClientSession },
+  opts: { session: ClientSession },
 ): Promise<void> {
+  // The session is required: an audit entry always commits (or rolls back) with its mutation.
   await db.collection(C.auditLog).insertOne(
     {
       entity: entry.entity,
@@ -23,6 +24,6 @@ export async function writeAudit(
       after: entry.after ?? null,
       at: new Date(),
     },
-    opts?.session ? { session: opts.session } : undefined,
+    { session: opts.session },
   );
 }

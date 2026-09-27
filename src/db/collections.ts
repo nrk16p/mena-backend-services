@@ -2,6 +2,7 @@ export const C = {
   counters: 'counters',
   users: 'users',
   refreshTokens: 'refreshTokens',
+  refreshFamilies: 'refreshFamilies',
   apiKeys: 'apiKeys',
   auditLog: 'auditLog',
   clients: 'clients',

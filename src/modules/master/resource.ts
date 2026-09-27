@@ -8,6 +8,7 @@ import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import { escapeRegex } from '../../lib/regex.js';
 import { STAFF_ROLES, type Role } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
+import { withTransaction } from '../../lib/tx.js';
 
 export interface RefSpec {
   path: string;
@@ -147,9 +148,12 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
       const prepared = await prepareDoc(def, app.db, req.body as Obj, null, pf);
       const now = new Date();
       const doc: Obj = { ...prepared, ...pf, active: true, createdAt: now, updatedAt: now };
-      const res = await coll().insertOne(doc);
-      const saved = { ...doc, _id: res.insertedId };
-      await writeAudit(app.db, { entity: def.name, entityId: res.insertedId.toHexString(), action: 'create', by: actorOf(req), after: toApi(saved) });
+      const saved = await withTransaction(app.mongo, async (session) => {
+        const res = await coll().insertOne({ ...doc }, { session });
+        const created = { ...doc, _id: res.insertedId };
+        await writeAudit(app.db, { entity: def.name, entityId: res.insertedId.toHexString(), action: 'create', by: actorOf(req), after: toApi(created) }, { session });
+        return created;
+      });
       return reply.status(201).send(out(saved));
     });
 
@@ -163,22 +167,28 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
       const prepared = await prepareDoc(def, app.db, fields, existing, pf);
       const set: Obj = { ...prepared, updatedAt: new Date() };
       if (active !== undefined) set.active = active;
-      const updated = await coll().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after' });
-      if (!updated) throw notFound(def.name);
-      await writeAudit(app.db, { entity: def.name, entityId: params.id, action: 'update', by: actorOf(req), before: toApi(existing), after: toApi(updated) });
+      const updated = await withTransaction(app.mongo, async (session) => {
+        const u = await coll().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after', session });
+        if (!u) throw notFound(def.name);
+        await writeAudit(app.db, { entity: def.name, entityId: params.id, action: 'update', by: actorOf(req), before: toApi(existing), after: toApi(u) }, { session });
+        return u;
+      });
       return out(updated);
     });
 
     app.delete(`${def.path}/:id`, { schema: { tags: [def.name], params: idParams, response: { 200: itemSchema } }, preHandler: writeGuard }, async (req) => {
       const params = req.params as Obj & { id: string };
       const pf = await parentFilter(params);
-      const updated = await coll().findOneAndUpdate(
-        { _id: new ObjectId(params.id), ...pf },
-        { $set: { active: false, updatedAt: new Date() } },
-        { returnDocument: 'after' },
-      );
-      if (!updated) throw notFound(def.name);
-      await writeAudit(app.db, { entity: def.name, entityId: params.id, action: 'deactivate', by: actorOf(req) });
+      const updated = await withTransaction(app.mongo, async (session) => {
+        const u = await coll().findOneAndUpdate(
+          { _id: new ObjectId(params.id), ...pf },
+          { $set: { active: false, updatedAt: new Date() } },
+          { returnDocument: 'after', session },
+        );
+        if (!u) throw notFound(def.name);
+        await writeAudit(app.db, { entity: def.name, entityId: params.id, action: 'deactivate', by: actorOf(req) }, { session });
+        return u;
+      });
       return out(updated);
     });
   };
