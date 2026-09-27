@@ -67,4 +67,34 @@ describe('user administration', () => {
     expect(off.json().active).toBe(false);
     expect((await app.inject({ method: 'GET', url: '/api/v1/me', headers: target.headers })).statusCode).toBe(401);
   });
+
+  it('blocks demoting or deactivating the last active admin, even via self-patch', async () => {
+    // The `admin` fixture created in beforeAll is, at this point, the only active admin.
+    const soleAdmin = await app.db.collection(C.users).findOne({ roles: 'admin', active: true });
+    const id = (soleAdmin!._id as ObjectId).toHexString();
+
+    const demote = await app.inject({ method: 'PATCH', url: `/api/v1/users/${id}`, headers: admin, payload: { roles: ['viewer'] } });
+    expect(demote.statusCode).toBe(422);
+    expect(demote.json().code).toBe('LAST_ADMIN');
+
+    const deactivate = await app.inject({ method: 'PATCH', url: `/api/v1/users/${id}`, headers: admin, payload: { active: false } });
+    expect(deactivate.statusCode).toBe(422);
+    expect(deactivate.json().code).toBe('LAST_ADMIN');
+
+    // Confirm nothing was actually changed by either rejected attempt.
+    const stillAdmin = await app.db.collection(C.users).findOne({ _id: soleAdmin!._id as ObjectId });
+    expect(stillAdmin).toMatchObject({ active: true, roles: ['admin'] });
+  });
+
+  it('allows demoting an admin once another active admin remains', async () => {
+    const second = await createUserAndLogin(app, ['admin'], { username: 'admin2' });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/users/${second.user._id.toHexString()}`,
+      headers: admin,
+      payload: { roles: ['viewer'] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().roles).toEqual(['viewer']);
+  });
 });

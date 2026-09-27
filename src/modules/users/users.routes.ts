@@ -87,6 +87,15 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     const roles = req.body.roles ?? existing.roles;
     const driverId = req.body.driverId === undefined ? existing.driverId : req.body.driverId ? new ObjectId(req.body.driverId) : null;
     await assertDriverLink(app.db, roles, driverId);
+    const willBeActive = req.body.active ?? existing.active;
+    const willBeAdmin = roles.includes('admin');
+    const wasActiveAdmin = existing.active && existing.roles.includes('admin');
+    if (wasActiveAdmin && !(willBeActive && willBeAdmin)) {
+      const otherActiveAdmins = await users().countDocuments({ _id: { $ne: _id }, active: true, roles: 'admin' }, { limit: 1 });
+      if (otherActiveAdmins === 0) {
+        throw unprocessable('LAST_ADMIN', 'Cannot deactivate or demote the last active admin');
+      }
+    }
     const set: Partial<UserDoc> = { roles, driverId, updatedAt: new Date() };
     if (req.body.active !== undefined) set.active = req.body.active;
     if (req.body.password) set.passwordHash = await hashPassword(req.body.password);

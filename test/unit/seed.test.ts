@@ -34,6 +34,21 @@ describe('seed', () => {
     expect(await verifyPassword(admin!.passwordHash, 'Admin-pass-1')).toBe(true);
   });
 
+  it('restores a locked-out admin with force, without touching the password', async () => {
+    expect(await seedAdmin(db, 'lockedadmin', 'Original-pass-1')).toBe('created');
+    await db.collection(C.users).updateOne({ username: 'lockedadmin' }, { $set: { active: false, roles: ['viewer'] } });
+
+    expect(await seedAdmin(db, 'lockedadmin', 'other')).toBe('exists');
+    const untouched = await findUserByUsername(db, 'lockedadmin');
+    expect(untouched?.active).toBe(false);
+
+    expect(await seedAdmin(db, 'lockedadmin', 'ignored-pass', { force: true })).toBe('restored');
+    const restored = await findUserByUsername(db, 'lockedadmin');
+    expect(restored?.active).toBe(true);
+    expect(restored?.roles).toContain('admin');
+    expect(await verifyPassword(restored!.passwordHash, 'Original-pass-1')).toBe(true);
+  });
+
   it('seeds demo data idempotently and it matches a job group', async () => {
     await seedDemo(db);
     await seedDemo(db);

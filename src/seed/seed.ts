@@ -33,10 +33,23 @@ export async function seedBase(db: Db): Promise<void> {
   for (const p of BASE_PALLET_MOVEMENT_TYPES) await upsertByCode(db, C.palletMovementTypes, { ...p });
 }
 
-export async function seedAdmin(db: Db, username: string, password: string): Promise<'created' | 'exists'> {
-  if (await findUserByUsername(db, username)) return 'exists';
-  await createUser(db, { username, password, roles: ['admin'] });
-  return 'created';
+export async function seedAdmin(
+  db: Db,
+  username: string,
+  password: string,
+  opts: { force?: boolean } = {},
+): Promise<'created' | 'exists' | 'restored'> {
+  const existing = await findUserByUsername(db, username);
+  if (!existing) {
+    await createUser(db, { username, password, roles: ['admin'] });
+    return 'created';
+  }
+  if (!opts.force) return 'exists';
+  // Recovery path for a locked-out admin: reactivate and (re-)grant the admin role
+  // without touching the password, so this can't be used to take over the account.
+  const roles = existing.roles.includes('admin') ? existing.roles : [...existing.roles, 'admin'];
+  await db.collection(C.users).updateOne({ _id: existing._id }, { $set: { active: true, roles, updatedAt: new Date() } });
+  return 'restored';
 }
 
 export async function seedDemo(db: Db): Promise<void> {
