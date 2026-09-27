@@ -87,3 +87,7 @@ export async function validate(app: App, f: PlanningFixtures, payload: object) {
 }
 
 export const codes = (issues: { code: string }[]) => issues.map((i) => i.code).sort();
+
+export async function postShipment(app: App, f: PlanningFixtures, payload: object) {
+  return app.inject({ method: 'POST', url: '/api/v1/shipments', headers: f.planner, payload });
+}
