@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import RequireAuth from './components/RequireAuth';
 import LoginPage from './pages/LoginPage';
 import DeliveryOrdersPage from './pages/DeliveryOrdersPage';
+import PodReviewPage from './pages/PodReviewPage';
 import ShipmentDetailPage from './pages/ShipmentDetailPage';
 import ShipmentNewPage from './pages/ShipmentNewPage';
 import ShipmentsPage from './pages/ShipmentsPage';
@@ -21,6 +22,7 @@ const router = createBrowserRouter([
       { path: '/shipments', element: <ShipmentsPage /> },
       { path: '/shipments/new', element: <ShipmentNewPage /> },
       { path: '/shipments/:id', element: <ShipmentDetailPage /> },
+      { path: '/pods', element: <PodReviewPage /> },
     ],
   },
 ]);
