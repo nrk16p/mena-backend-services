@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ApiError, login } from '@shared/api';
+import { getPosition } from '../lib/gps';
 
 export default function LoginPage() {
   const nav = useNavigate();
@@ -15,7 +16,8 @@ export default function LoginPage() {
     e.preventDefault();
     setBusy(true);
     try {
-      await login(username, password);
+      const pos = await getPosition();
+      await login(username, password, pos.lat !== null && pos.lng !== null ? { lat: pos.lat, lng: pos.lng } : {});
       nav('/');
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'เข้าสู่ระบบไม่สำเร็จ');

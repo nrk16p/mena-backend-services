@@ -14,5 +14,5 @@ export default defineConfig({
     },
   },
   server: { port: 5174, host: true, proxy: { '/api': 'http://localhost:3000' }, fs: { allow: [path.resolve(__dirname, '..')] } },
-  test: { environment: 'jsdom', include: ['src/**/*.test.{ts,tsx}'] },
+  test: { environment: 'jsdom', include: ['src/**/*.test.{ts,tsx}', '../shared/**/*.test.ts'] },
 });
