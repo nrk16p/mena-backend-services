@@ -1,7 +1,9 @@
 import Fastify from 'fastify';
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod';
 import type { Config } from './config.js';
+import errorsPlugin from './plugins/errors.js';
 import mongoPlugin from './plugins/mongo.js';
+import openapiPlugin from './plugins/openapi.js';
 
 export async function buildApp(config: Config) {
   const app = Fastify({
@@ -12,9 +14,11 @@ export async function buildApp(config: Config) {
   app.setSerializerCompiler(serializerCompiler);
   app.decorate('config', config);
 
+  await app.register(errorsPlugin);
+  await app.register(openapiPlugin);
   await app.register(mongoPlugin);
 
-  app.get('/health', async () => {
+  app.get('/health', { schema: { tags: ['system'] } }, async () => {
     await app.db.command({ ping: 1 });
     return { status: 'ok' };
   });
