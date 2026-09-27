@@ -35,6 +35,13 @@ export const INDEXES: Record<string, IndexDescription[]> = {
   ],
   [C.statusCodes]: [{ key: { code: 1 }, unique: true }],
   [C.holidays]: [{ key: { date: 1 }, unique: true }],
+  [C.deliveryOrders]: [
+    { key: { doNo: 1 }, unique: true },
+    { key: { status: 1, clientId: 1 } },
+    { key: { shipmentId: 1 } },
+    { key: { 'pickupWindow.from': 1 } },
+    { key: { clientId: 1, clientRef: 1 } },
+  ],
 };
 
 export async function ensureIndexes(db: Db): Promise<void> {
