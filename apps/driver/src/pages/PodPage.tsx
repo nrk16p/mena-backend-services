@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,7 @@ import type { DriverShipment, Issue, PodField, PodFile } from '@shared/types';
 import SignaturePad from '../components/SignaturePad';
 import { getPosition } from '../lib/gps';
 import { compressImage } from '../lib/image';
+import { keptPalletLines, podFormProblems } from '../lib/podFormProblems';
 import { uploadFile } from '../lib/upload';
 import { useWakeLock } from '../lib/useWakeLock';
 
@@ -62,6 +63,13 @@ export default function PodPage() {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [issues, setIssues] = useState<Issue[]>([]);
+  // Two quick taps can both fire before setBusy(true) is reflected in a re-render, so the
+  // authoritative "already submitting" check is this synchronous ref, read at the very top of
+  // submit() before any state update or await.
+  const inFlightRef = useRef(false);
+  // Blobs that already uploaded successfully, so a retry after a failed attempt (e.g. the
+  // apiFetch POST failing after uploads succeeded) doesn't re-upload the same photos/signature.
+  const uploadedRef = useRef(new Map<Blob, PodFile>());
   useWakeLock(true);
   if (!job || !d) return <p className="p-4">กำลังโหลด…</p>;
   const fields = failed ? d.podForm.fields.filter((f) => f.type === 'photo') : d.podForm.fields;
@@ -77,12 +85,36 @@ export default function PodPage() {
   const removePhoto = (key: string, i: number) => setBlobs((x) => ({ ...x, [key]: (x[key] ?? []).filter((_, j) => j !== i) }));
 
   const submit = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setBusy(true);
     setIssues([]);
     try {
+      // Drop palletLines rows the driver never really filled in before validating/sending.
+      const cleanedAnswers: Record<string, unknown> = { ...answers };
+      for (const f of fields) {
+        if (f.type === 'palletLines') {
+          cleanedAnswers[f.key] = keptPalletLines((answers[f.key] as { type: string; qty: number }[] | undefined) ?? []);
+        }
+      }
+
+      const blobCounts = Object.fromEntries(Object.entries(blobs).map(([k, v]) => [k, v.length]));
+      const problems = podFormProblems(fields, { ...cleanedAnswers, reason, note }, blobCounts, failed);
+      if (problems.length > 0) {
+        setIssues(problems.map((message) => ({ code: 'POD_LOCAL_INVALID', message })));
+        return;
+      }
+
       const files: PodFile[] = [];
       for (const [fieldKey, list] of Object.entries(blobs)) {
-        for (const blob of list) files.push(await uploadFile(job.id, d.id, fieldKey, blob));
+        for (const blob of list) {
+          let file = uploadedRef.current.get(blob);
+          if (!file) {
+            file = await uploadFile(job.id, d.id, fieldKey, blob);
+            uploadedRef.current.set(blob, file);
+          }
+          files.push(file);
+        }
       }
       const pos = await getPosition();
       await apiFetch('POST', '/api/v1/driver/pods', {
@@ -91,7 +123,7 @@ export default function PodPage() {
         outcome: failed ? 'FAILED' : 'DELIVERED',
         reasonCode: failed ? reason : null,
         note: note || null,
-        answers: failed ? {} : answers,
+        answers: failed ? {} : cleanedAnswers,
         files,
         ...pos,
         deviceTime: new Date().toISOString(),
@@ -106,6 +138,7 @@ export default function PodPage() {
       toast.error(e instanceof Error ? e.message : 'ส่งไม่สำเร็จ');
     } finally {
       setBusy(false);
+      inFlightRef.current = false;
     }
   };
 
