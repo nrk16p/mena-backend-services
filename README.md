@@ -40,6 +40,7 @@ npm run dev                 # http://localhost:3000
 | `npm run typecheck` | TypeScript check |
 | `npm run build && npm start` | Production build and start |
 | `npm run seed` | Idempotent base data + admin (`SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`) |
+| `npm run seed -- --force-admin` | Also reactivates `SEED_ADMIN_USERNAME` (`active: true`) and re-grants the `admin` role if it was demoted, **without changing the password** — recovery for a locked-out admin (see "Last admin lock-out" below) |
 
 ## Conventions
 
@@ -48,3 +49,30 @@ npm run dev                 # http://localhost:3000
 - Roles: `admin`, `planner`, `driver`, `viewer`. Service integrations use `x-api-key` with scopes.
 - Master data is never hard-deleted: `DELETE` sets `active: false`.
 - Truck types seeded as rigid (Mixer, Feedmill, Coldchain, Side Curtain) and tractor (Trailer). Add tractor variants (e.g. a Side Curtain trailer) as new truck types.
+
+## Reverse proxy / `TRUST_PROXY`
+
+The login rate limit is keyed by `req.ip` (plus the submitted username). Behind a reverse
+proxy, Fastify ignores `X-Forwarded-For` by default, so every request looks like it comes
+from the proxy's own IP and all users share one rate-limit bucket. Set `TRUST_PROXY` to
+tell Fastify how many hops of `X-Forwarded-For` to trust:
+
+- `false` (default) — no reverse proxy; use the raw socket IP.
+- `true` — trust the immediate peer's forwarded chain unconditionally.
+- a positive integer — trust exactly that many proxy hops (e.g. `1` for a single
+  reverse proxy in front of the app).
+
+**Set `TRUST_PROXY=1` on Render.**
+
+## Last admin lock-out
+
+`PATCH /users/:id` refuses (422 `LAST_ADMIN`) any change — deactivating or removing the
+`admin` role, including on yourself — that would leave zero active admins. If that
+happens anyway (e.g. the account was disabled some other way), recover with:
+
+```bash
+SEED_ADMIN_USERNAME=admin SEED_ADMIN_PASSWORD=irrelevant npm run seed -- --force-admin
+```
+
+This reactivates the user and adds back the `admin` role without touching the existing
+password.
