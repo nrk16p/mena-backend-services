@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { objectIdString } from '../../lib/ids.js';
 import { IssueSchema } from '../../lib/issues.js';
+import { STOP_STATUSES } from '../../lib/status.js';
 import { SHIPMENT_STATUSES } from './shipment.types.js';
 
 const iso = z.string().datetime({ offset: true });
@@ -63,7 +64,7 @@ export const ShipmentItem = z.object({
       pickupDoIds: z.array(z.string()),
       dropDoIds: z.array(z.string()),
       plannedArrival: z.string().nullable(),
-      status: z.string(),
+      status: z.enum(STOP_STATUSES),
     }),
   ),
   legs: z.array(

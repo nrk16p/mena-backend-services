@@ -37,11 +37,14 @@ export const uploadRoutes: FastifyPluginAsyncZod = async (app) => {
     },
     async (req) => {
       const shipment = await loadDriverShipment(app.db, new ObjectId(req.body.shipmentId), driverIdOf(req));
-      if (!doIdsOf(shipment.stops).some((id) => id.toHexString() === req.body.doId)) throw notFound('Delivery order');
+      const doId = req.body.doId.toLowerCase();
+      if (!doIdsOf(shipment.stops).some((id) => id.toHexString() === doId)) throw notFound('Delivery order');
       if (!ACTIVE_FOR_UPLOAD.includes(shipment.status)) {
         throw unprocessable('SHIPMENT_NOT_ACTIVE', `Uploads are not allowed for a ${shipment.status} shipment`);
       }
-      const key = `pods/${req.body.shipmentId}/${req.body.doId}/${randomUUID()}.${UPLOAD_TYPES[req.body.contentType]}`;
+      // `shipment._id`/`doId` are normalised (lowercase hex) here rather than trusting the
+      // request body verbatim, since `objectIdString` accepts uppercase hex too.
+      const key = `pods/${shipment._id.toHexString()}/${doId}/${randomUUID()}.${UPLOAD_TYPES[req.body.contentType]}`;
       const expiresInSec = 300;
       return {
         key,
@@ -57,22 +60,36 @@ export const uploadRoutes: FastifyPluginAsyncZod = async (app) => {
   // Local upload links (memory storage only) so the browser demo works without Spaces keys.
   if (app.config.STORAGE_DRIVER === 'memory') {
     const LocalQuery = z.object({ key: z.string().min(1), exp: z.string(), sig: z.string() });
-    const check = (q: z.infer<typeof LocalQuery>) => {
-      if (!verifyLocalSignature(app.config.JWT_SECRET, q.key, q.exp, q.sig)) throw new AppError(403, 'INVALID_SIGNATURE', 'The upload link is invalid or expired');
-    };
     const localRoutes: FastifyPluginAsyncZod = async (local) => {
       local.addContentTypeParser(/^(image|application)\//, { parseAs: 'buffer', bodyLimit: app.config.UPLOAD_MAX_BYTES }, (_req, body, done) => done(null, body));
+
       local.put('/uploads/local', { schema: { hide: true, querystring: LocalQuery } }, async (req, reply) => {
-        check(req.query);
+        const contentType = req.headers['content-type']?.split(';')[0]?.trim().toLowerCase();
+        if (!contentType || !(contentType in UPLOAD_TYPES)) {
+          throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', `Content type must be one of: ${Object.keys(UPLOAD_TYPES).join(', ')}`);
+        }
+        // The signature is bound to method + content type, so a GET link (or a link signed for a
+        // different content type) can't be replayed here even if it's otherwise well-formed.
+        if (!verifyLocalSignature(app.config.JWT_SECRET, 'PUT', req.query.key, req.query.exp, req.query.sig, contentType)) {
+          throw new AppError(403, 'INVALID_SIGNATURE', 'The upload link is invalid or expired');
+        }
         const body = req.body as Buffer;
-        await app.storage.put(req.query.key, body, req.headers['content-type'] ?? 'application/octet-stream');
+        await app.storage.put(req.query.key, body, contentType);
         return reply.status(204).send();
       });
+
       local.get('/uploads/local', { schema: { hide: true, querystring: LocalQuery } }, async (req, reply) => {
-        check(req.query);
+        if (!verifyLocalSignature(app.config.JWT_SECRET, 'GET', req.query.key, req.query.exp, req.query.sig)) {
+          throw new AppError(403, 'INVALID_SIGNATURE', 'The upload link is invalid or expired');
+        }
         const obj = await app.storage.get(req.query.key);
         if (!obj) throw notFound('File');
-        return reply.header('content-type', obj.contentType).send(obj.body);
+        return reply
+          .header('content-type', obj.contentType)
+          .header('x-content-type-options', 'nosniff')
+          // Photos served back to a browser must never execute as HTML/script: sandbox them.
+          .header('content-security-policy', 'sandbox')
+          .send(obj.body);
       });
     };
     await app.register(localRoutes);

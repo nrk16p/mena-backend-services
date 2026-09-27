@@ -65,4 +65,34 @@ describe('loadConfig', () => {
     });
     expect(s3.SPACES_REGION).toBe('sgp1');
   });
+
+  it('treats empty Spaces env strings as unset so `cp .env.example .env` boots in memory mode', () => {
+    const c = loadConfig({
+      ...base,
+      STORAGE_DRIVER: 'memory',
+      SPACES_ENDPOINT: '',
+      SPACES_BUCKET: '',
+      SPACES_KEY: '',
+      SPACES_SECRET: '',
+    });
+    expect(c.SPACES_ENDPOINT).toBeUndefined();
+    expect(c.SPACES_BUCKET).toBeUndefined();
+    expect(c.SPACES_KEY).toBeUndefined();
+    expect(c.SPACES_SECRET).toBeUndefined();
+  });
+
+  it('rejects STORAGE_DRIVER=memory in production', () => {
+    expect(() => loadConfig({ ...base, NODE_ENV: 'production', STORAGE_DRIVER: 'memory' })).toThrow(/STORAGE_DRIVER/);
+    expect(() =>
+      loadConfig({
+        ...base,
+        NODE_ENV: 'production',
+        STORAGE_DRIVER: 's3',
+        SPACES_ENDPOINT: 'https://sgp1.digitaloceanspaces.com',
+        SPACES_BUCKET: 'b',
+        SPACES_KEY: 'k',
+        SPACES_SECRET: 's',
+      }),
+    ).not.toThrow();
+  });
 });

@@ -18,13 +18,24 @@ export interface Storage {
   put(key: string, body: Buffer, contentType: string): Promise<void>;
 }
 
-export function signLocal(secret: string, key: string, exp: string): string {
-  return createHmac('sha256', secret).update(`${key}\n${exp}`).digest('hex');
+/**
+ * The local upload link's HMAC key is a subkey derived from JWT_SECRET (never the secret itself
+ * used directly as a MAC key), so a leaked link-signing key can't be replayed against anything
+ * that uses JWT_SECRET directly (e.g. access tokens).
+ */
+export function deriveLocalUploadKey(jwtSecret: string): Buffer {
+  return createHmac('sha256', jwtSecret).update('local-upload').digest();
 }
 
-export function verifyLocalSignature(secret: string, key: string, exp: string, sig: string): boolean {
+/** The signature covers the method and (for PUT) the content type, so a link can't be replayed
+ * for a different HTTP method or with a different content type than it was issued for. */
+export function signLocal(secret: string, method: string, key: string, exp: string, contentType?: string): string {
+  return createHmac('sha256', deriveLocalUploadKey(secret)).update(`${method}\n${key}\n${exp}\n${contentType ?? ''}`).digest('hex');
+}
+
+export function verifyLocalSignature(secret: string, method: string, key: string, exp: string, sig: string, contentType?: string): boolean {
   if (!/^\d+$/.test(exp) || Number(exp) * 1000 < Date.now()) return false;
-  const expected = signLocal(secret, key, exp);
+  const expected = signLocal(secret, method, key, exp, contentType);
   // Compare lengths before hex-decoding: Buffer.from(_, 'hex') silently drops a trailing odd
   // nibble, so a forged signature one character longer than the real one would otherwise decode
   // to the same byte length and could pass timingSafeEqual.
@@ -36,19 +47,25 @@ export function verifyLocalSignature(secret: string, key: string, exp: string, s
 
 export class MemoryStorage implements Storage {
   readonly objects = new Map<string, StoredObject>();
-  constructor(private readonly local?: { baseUrl: string; secret: string }) {}
+  private readonly local?: { baseUrl: string; secret: string };
 
-  private link(key: string, expiresSec: number): string {
+  constructor(local?: { baseUrl: string; secret: string }) {
+    // Strip a trailing slash so `${baseUrl}/api/v1/...` never doubles up on `//`.
+    this.local = local ? { baseUrl: local.baseUrl.replace(/\/+$/, ''), secret: local.secret } : undefined;
+  }
+
+  private link(method: 'PUT' | 'GET', key: string, expiresSec: number, contentType?: string): string {
     if (!this.local) return `memory://${key}`;
     const exp = String(Math.floor(Date.now() / 1000) + expiresSec);
-    const q = new URLSearchParams({ key, exp, sig: signLocal(this.local.secret, key, exp) });
+    const sig = signLocal(this.local.secret, method, key, exp, contentType);
+    const q = new URLSearchParams({ key, exp, sig });
     return `${this.local.baseUrl}/api/v1/uploads/local?${q.toString()}`;
   }
-  async presignPut(key: string, _contentType?: string, expiresSec = 300): Promise<string> {
-    return this.link(key, expiresSec);
+  async presignPut(key: string, contentType: string, expiresSec = 300): Promise<string> {
+    return this.link('PUT', key, expiresSec, contentType);
   }
   async presignGet(key: string, expiresSec = 300): Promise<string> {
-    return this.link(key, expiresSec);
+    return this.link('GET', key, expiresSec);
   }
   async get(key: string): Promise<StoredObject | null> {
     return this.objects.get(key) ?? null;

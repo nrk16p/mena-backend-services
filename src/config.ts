@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+// `.env.example` ships optional Spaces settings as `KEY=` (empty string) so the file is easy to
+// read; an empty string must behave like "unset" rather than fail `.min(1)`, or `cp .env.example
+// .env && npm run dev` (memory-mode default) crashes on boot.
+function emptyToUndefined<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((v) => (v === '' ? undefined : v), schema.optional());
+}
+
 const BaseEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('0.0.0.0'),
@@ -29,16 +36,23 @@ const BaseEnvSchema = z.object({
       message: 'TRUST_PROXY must be "true", "false", or a positive integer hop count',
     }),
   STORAGE_DRIVER: z.enum(['s3', 'memory']).default('memory'),
-  SPACES_ENDPOINT: z.string().url().optional(),
+  SPACES_ENDPOINT: emptyToUndefined(z.string().url()),
   SPACES_REGION: z.string().default('sgp1'),
-  SPACES_BUCKET: z.string().min(1).optional(),
-  SPACES_KEY: z.string().min(1).optional(),
-  SPACES_SECRET: z.string().min(1).optional(),
+  SPACES_BUCKET: emptyToUndefined(z.string().min(1)),
+  SPACES_KEY: emptyToUndefined(z.string().min(1)),
+  SPACES_SECRET: emptyToUndefined(z.string().min(1)),
   UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
   PUBLIC_BASE_URL: z.string().url().default('http://localhost:3000'),
 });
 
 const EnvSchema = BaseEnvSchema.superRefine((env, ctx) => {
+  if (env.NODE_ENV === 'production' && env.STORAGE_DRIVER === 'memory') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['STORAGE_DRIVER'],
+      message: 'STORAGE_DRIVER=memory is not allowed when NODE_ENV=production (uploads would be lost on restart); set STORAGE_DRIVER=s3 with Spaces credentials',
+    });
+  }
   if (env.STORAGE_DRIVER !== 's3') return;
   for (const k of ['SPACES_ENDPOINT', 'SPACES_BUCKET', 'SPACES_KEY', 'SPACES_SECRET'] as const) {
     if (!env[k]) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [k], message: `${k} is required when STORAGE_DRIVER=s3` });

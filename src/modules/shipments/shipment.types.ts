@@ -1,5 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import type { Issue } from '../../lib/issues.js';
+import type { StopStatus } from '../../lib/status.js';
 
 export const SHIPMENT_STATUSES = ['DRAFT', 'PLANNED', 'DISPATCHED', 'ACCEPTED', 'IN_TRANSIT', 'COMPLETED', 'CLOSED', 'CANCELLED'] as const;
 export type ShipmentStatus = (typeof SHIPMENT_STATUSES)[number];
@@ -19,7 +20,7 @@ export interface StopDoc {
   pickupDoIds: ObjectId[];
   dropDoIds: ObjectId[];
   plannedArrival: Date | null;
-  status: 'PENDING';
+  status: StopStatus;
 }
 
 export interface LegDoc {
