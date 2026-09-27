@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
@@ -52,6 +53,27 @@ describe('refresh tokens (default 30 s reuse grace)', () => {
     const { refreshToken, user } = await createUserAndLogin(app, ['planner']);
     await app.db.collection(C.users).updateOne({ _id: user._id }, { $set: { active: false } });
     expect((await refresh(app, refreshToken)).statusCode).toBe(401);
+  });
+
+  it('rejects a replay once replacedAt is older than the reuse grace window, and revokes the whole family', async () => {
+    const { refreshToken } = await createUserAndLogin(app, ['planner']);
+    const rotated = await refresh(app, refreshToken);
+    expect(rotated.statusCode).toBe(200);
+    const newerToken = rotated.json().refreshToken as string;
+
+    // Backdate the used token's replacedAt beyond the default 30 s grace, simulating
+    // a very late/stale retry rather than a quick client-side double-send.
+    const usedId = new ObjectId(refreshToken.split('.')[0]);
+    const backdated = new Date(Date.now() - 31_000);
+    await app.db.collection(C.refreshTokens).updateOne({ _id: usedId }, { $set: { replacedAt: backdated } });
+
+    const replay = await refresh(app, refreshToken);
+    expect(replay.statusCode).toBe(401);
+    expect(replay.json().code).toBe('REFRESH_TOKEN_REUSED');
+
+    // The whole family, including the newer token issued by the rotation above, must
+    // now be revoked.
+    expect((await refresh(app, newerToken)).statusCode).toBe(401);
   });
 
   it('changes password, revokes sessions, and the new password works', async () => {
