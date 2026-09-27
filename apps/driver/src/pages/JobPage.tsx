@@ -11,6 +11,7 @@ import { STEP_TH, nextStep } from '@shared/steps';
 import type { DriverShipment, EventItem } from '@shared/types';
 import { createTapSender, type EventResult } from '../lib/events';
 import { getPosition } from '../lib/gps';
+import { podActionState } from '../lib/podAction';
 
 const REASONS = ['TRAFFIC', 'BREAKDOWN', 'WEATHER', 'CHECKPOINT', 'CONSIGNEE_CLOSED', 'NO_RECEIVER', 'WRONG_ADDRESS', 'OTHER'];
 const tap = createTapSender((body) => apiFetch<{ results: EventResult[] }>('POST', '/api/v1/driver/events', body));
@@ -84,13 +85,19 @@ export default function JobPage() {
               s.dropDoIds.map((doId) => {
                 const o = dos.get(doId);
                 if (!o) return null;
-                const needsPod = ['PICKED_UP', 'POD_REJECTED', 'PLANNED'].includes(o.status);
-                if (!needsPod || !d.has('ARRIVED')) return null;
+                const podState = podActionState(d, o.status);
+                if (podState === 'hidden') return null;
                 return (
                   <div key={doId} className="grid grid-cols-2 gap-2">
-                    <Button asChild className="h-12" disabled={!d.has('UNLOAD_END')}>
-                      <Link to={`/jobs/${job.id}/pod/${doId}`}>POD {o.doNo}</Link>
-                    </Button>
+                    {podState === 'ready' ? (
+                      <Button asChild className="h-12">
+                        <Link to={`/jobs/${job.id}/pod/${doId}`}>POD {o.doNo}</Link>
+                      </Button>
+                    ) : (
+                      <Button className="h-12" disabled>
+                        POD {o.doNo}
+                      </Button>
+                    )}
                     <Button asChild variant="outline" className="h-12">
                       <Link to={`/jobs/${job.id}/pod/${doId}?failed=1`}>ส่งไม่สำเร็จ</Link>
                     </Button>
@@ -100,7 +107,7 @@ export default function JobPage() {
             {isCurrent && d.has('ARRIVED') && !d.has('DEPARTED') && extras.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {extras.map((c) => (
-                  <Button key={c} variant="secondary" disabled={busy} onClick={() => void send(s.stopId, c)}>
+                  <Button key={c} className="h-12" variant="secondary" disabled={busy} onClick={() => void send(s.stopId, c)}>
                     {STEP_TH[c] ?? c}
                   </Button>
                 ))}
@@ -142,11 +149,13 @@ export default function JobPage() {
                 </SelectContent>
               </Select>
               <Textarea placeholder="รายละเอียด" value={problem.note} onChange={(e) => setProblem({ ...problem, note: e.target.value })} />
+              {problem.reason === 'OTHER' && !problem.note.trim() && <p className="text-sm text-red-600">เหตุอื่น (OTHER) ต้องระบุรายละเอียด</p>}
             </div>
           )}
           <DialogFooter>
             <Button
-              disabled={busy}
+              className="h-12"
+              disabled={busy || (problem?.reason === 'OTHER' && !problem.note.trim())}
               onClick={() => {
                 if (!problem) return;
                 void send(null, problem.code, { reasonCode: problem.reason, note: problem.note || undefined });
