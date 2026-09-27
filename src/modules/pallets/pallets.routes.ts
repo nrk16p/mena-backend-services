@@ -12,10 +12,10 @@ import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
 import type { UserPrincipal } from '../../lib/principal.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
+import { DRIVER_WRITE_STATUSES } from '../../lib/status.js';
 import { withTransaction } from '../../lib/tx.js';
 import { driverIdOf, loadDriverShipment } from '../shipments/driver-access.js';
 import { doIdsOf } from '../shipments/shipment.service.js';
-import type { ShipmentStatus } from '../shipments/shipment.types.js';
 import { geofenceTarget } from '../execution/stop-context.js';
 
 interface MovementDoc {
@@ -40,7 +40,8 @@ const MovementItem = z.object({
   balanceAfter: z.number(), source: z.enum(['app', 'admin']), by: z.string(),
 });
 
-const PALLET_ACTIVE_STATUSES: ShipmentStatus[] = ['ACCEPTED', 'IN_TRANSIT', 'COMPLETED'];
+/** One movement moves at most this many pallets; a typo like 10000 is rejected at the door. */
+const PalletQty = z.number().int().min(1).max(1000);
 
 const isDuplicateKey = (e: unknown, field: string) =>
   (e as { code?: unknown }).code === 11000 && !!(e as { keyPattern?: Record<string, unknown> }).keyPattern?.[field];
@@ -83,7 +84,7 @@ const DriverMovement = z
     stopId: objectIdString.nullable().default(null),
     doId: objectIdString.nullable().default(null),
     typeCode: z.string().trim().min(1).max(40),
-    qty: z.number().int().min(1),
+    qty: PalletQty,
     remark: z.string().trim().max(200).nullable().default(null),
   })
   .and(GpsFields);
@@ -114,7 +115,7 @@ export const palletRoutes: FastifyPluginAsyncZod = async (app) => {
         }
         try {
           const sh = await loadDriverShipment(app.db, new ObjectId(m.shipmentId), driverId);
-          if (!PALLET_ACTIVE_STATUSES.includes(sh.status)) throw unprocessable('SHIPMENT_NOT_ACTIVE', `Cannot record pallets on a ${sh.status} shipment`);
+          if (!DRIVER_WRITE_STATUSES.includes(sh.status)) throw unprocessable('SHIPMENT_NOT_ACTIVE', `Cannot record pallets on a ${sh.status} shipment`);
           const stop = m.stopId ? sh.stops.find((s) => s.stopId.toHexString() === m.stopId) : null;
           if (m.stopId && !stop) throw unprocessable('INVALID_REFERENCE', 'stopId is not a stop of this shipment', { field: 'stopId' });
           if (m.doId && !doIdsOf(sh.stops).some((id) => id.toHexString() === m.doId)) {
@@ -151,7 +152,7 @@ export const palletRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['pallets'],
-        body: z.object({ tailVehicleId: objectIdString, typeCode: z.string().trim().min(1).max(40), qty: z.number().int().min(1), remark: z.string().trim().min(3).max(200) }),
+        body: z.object({ tailVehicleId: objectIdString, typeCode: z.string().trim().min(1).max(40), qty: PalletQty, remark: z.string().trim().min(3).max(200) }),
         response: { 201: MovementItem },
       },
       preHandler: app.requireRoles('admin'),

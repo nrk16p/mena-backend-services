@@ -7,6 +7,18 @@ import type { ShipmentStatus } from '../modules/shipments/shipment.types.js';
 export const STOP_STATUSES = ['PENDING', 'ARRIVED', 'WORKING', 'DONE'] as const;
 export type StopStatus = (typeof STOP_STATUSES)[number];
 
+/** Statuses in which a shipment shows up in the driver app (job list, own timeline, P3-R13.5); anything else is "not found" to a driver. */
+export const DRIVER_VISIBLE_STATUSES: readonly ShipmentStatus[] = ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT', 'COMPLETED'];
+
+/**
+ * Statuses in which the driver may write to a shipment (events, uploads, pallet movements): from
+ * acceptance until close. COMPLETED still takes the last DEPARTED and a POD resubmission (P3-R4, spec §5.3).
+ */
+export const DRIVER_WRITE_STATUSES: readonly ShipmentStatus[] = ['ACCEPTED', 'IN_TRANSIT', 'COMPLETED'];
+
+/** A POD is taken once the trip has started; COMPLETED still takes a resubmission after a rejection. */
+export const POD_ACTIVE_STATUSES: readonly ShipmentStatus[] = ['IN_TRANSIT', 'COMPLETED'];
+
 /** DO statuses that count as "has a POD": they allow departing a drop stop and complete a shipment. */
 export const POD_DONE_STATUSES: readonly DoStatus[] = ['DELIVERED', 'FAILED', 'POD_VERIFIED', 'POD_REJECTED'];
 

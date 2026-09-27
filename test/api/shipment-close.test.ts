@@ -131,7 +131,7 @@ describe('close shipment', () => {
     const assigned = ok(await app.inject({
       method: 'POST', url: `/api/v1/delivery-orders/${dos[0].id}/job-group`, headers: f.planner, payload: { jobGroupId: f.ids.bulkGroup },
     }));
-    expect(assigned).toMatchObject({ jobGroupId: f.ids.bulkGroup, jobGroupMatch: { status: 'manual', candidates: [] } });
+    expect(assigned).toMatchObject({ jobGroupId: f.ids.bulkGroup, jobGroupMatch: { status: 'manual', candidates: [f.ids.bulkGroup] } });
     expect(await app.db.collection(C.auditLog).countDocuments({ entity: 'deliveryOrder', entityId: dos[0].id, action: 'job-group' })).toBe(1);
     const after = ok(await app.inject({ method: 'GET', url: `/api/v1/shipments/${shipment.id}`, headers: f.admin }));
     // A targeted field edit, not a planning re-validation: no shipment version bump.

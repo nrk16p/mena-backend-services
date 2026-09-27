@@ -7,12 +7,9 @@ import { notFound } from '../../lib/errors.js';
 import { IdParams } from '../../lib/ids.js';
 import { STAFF_ROLES } from '../../lib/roles.js';
 import { toApi } from '../../lib/serialize.js';
+import { DRIVER_VISIBLE_STATUSES } from '../../lib/status.js';
 import { driverIdOf, loadDriverShipment } from '../shipments/driver-access.js';
-import type { ShipmentStatus } from '../shipments/shipment.types.js';
 import { type EventDoc, EventInput, recordDriverEvent } from './events.service.js';
-
-/** Statuses the driver app's own timeline shows a shipment in (P3-R13.5); anything else is reported as not found. */
-const DRIVER_VISIBLE_STATUSES: ShipmentStatus[] = ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT', 'COMPLETED'];
 
 const EventResultSchema = z.object({
   clientEventId: z.string(),

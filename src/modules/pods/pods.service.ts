@@ -8,14 +8,14 @@ import { gpsFlags } from '../../lib/geo.js';
 import { GpsFields } from '../../lib/gps.js';
 import { objectIdString } from '../../lib/ids.js';
 import { mapLimit } from '../../lib/pool.js';
-import { deriveDoStatus, deriveShipmentStatus } from '../../lib/status.js';
+import { POD_ACTIVE_STATUSES, deriveDoStatus, deriveShipmentStatus } from '../../lib/status.js';
 import { withTransaction } from '../../lib/tx.js';
 import { REASON_CODES } from '../execution/event-rules.js';
 import { doneStepsAt, geofenceTarget } from '../execution/stop-context.js';
 import type { DeliveryOrderDoc, DoStatus } from '../orders/order.types.js';
 import { loadDriverShipment } from '../shipments/driver-access.js';
 import { doIdsOf } from '../shipments/shipment.service.js';
-import type { ShipmentDoc, ShipmentStatus } from '../shipments/shipment.types.js';
+import type { ShipmentDoc } from '../shipments/shipment.types.js';
 import { UPLOAD_TYPES, type UploadType, sha256OfStream } from '../storage/storage.js';
 import { podFormFor } from './pod-form.js';
 import { type PodFileRef, validatePodAnswers } from './pod-validation.js';
@@ -71,9 +71,6 @@ export interface PodDoc {
   supersedesPodId: ObjectId | null;
   by: string;
 }
-
-/** A POD is taken once the trip has started; COMPLETED still takes a resubmission after a rejection. */
-export const POD_ACTIVE_STATUSES: ShipmentStatus[] = ['IN_TRANSIT', 'COMPLETED'];
 
 /** Storage calls in flight at once while checking a POD's files. */
 const FILE_IO_CONCURRENCY = 4;

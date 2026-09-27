@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { ObjectId } from 'mongodb';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Collection, ObjectId } from 'mongodb';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
 import { buildTestApp, closeTestApp } from '../helpers/app.js';
@@ -16,6 +16,20 @@ describe('driver events', () => {
     f = await setupPlanning(app);
   });
   afterAll(async () => closeTestApp(app));
+  afterEach(() => vi.restoreAllMocks());
+
+  /** Makes the next `times` version-guarded shipment updates match nothing, as if a concurrent writer had just bumped the version. */
+  function loseVersionGuard(times: number) {
+    const original = Collection.prototype.updateOne as (...a: unknown[]) => Promise<unknown>;
+    let left = times;
+    return vi.spyOn(Collection.prototype, 'updateOne').mockImplementation(function (this: Collection, ...args: unknown[]) {
+      if (left > 0 && this.collectionName === C.shipments && (args[0] as { version?: unknown }).version !== undefined) {
+        left--;
+        return Promise.resolve({ acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0, upsertedId: null });
+      }
+      return original.apply(this, args);
+    } as never);
+  }
 
   it('records the pickup sequence, starts the trip and marks DOs picked up', async () => {
     const { shipment, dos } = await acceptedShipment(app, f);
@@ -165,5 +179,25 @@ describe('driver events', () => {
     expect(losers).toHaveLength(1);
     expect(losers[0]).toMatchObject({ status: 'rejected', code: 'CLIENT_EVENT_ID_REUSED' });
     expect(await app.db.collection(C.events).countDocuments({ clientEventId })).toBe(1);
+  });
+  it('retries an event once server-side when the version guard loses to a concurrent writer', async () => {
+    const { shipment } = await acceptedShipment(app, f, { day: '2026-10-21' });
+    const spy = loseVersionGuard(1);
+    const res = await tap(app, f, shipment, 0, 'ARRIVED', gps(14.53, 100.91, at('07:00', '2026-10-21')));
+    expect(res.status).toBe('accepted');
+    const guarded = spy.mock.calls.filter((c, i) => (spy.mock.contexts[i] as Collection).collectionName === C.shipments && (c[0] as { version?: unknown }).version !== undefined);
+    expect(guarded).toHaveLength(2); // lost once, re-read and won on the retry
+    expect(await app.db.collection(C.events).countDocuments({ shipmentId: new ObjectId(shipment.id), code: 'ARRIVED' })).toBe(1);
+    const stored = await app.db.collection(C.shipments).findOne({ _id: new ObjectId(shipment.id) });
+    expect(stored).toMatchObject({ status: 'IN_TRANSIT' });
+    expect(stored?.stops[0].status).toBe('ARRIVED');
+  });
+
+  it('rejects with SHIPMENT_CHANGED when the retry loses the version guard too', async () => {
+    const { shipment } = await acceptedShipment(app, f, { day: '2026-10-22' });
+    loseVersionGuard(2);
+    const res = await tap(app, f, shipment, 0, 'ARRIVED', gps(14.53, 100.91, at('07:00', '2026-10-22')));
+    expect(res).toMatchObject({ status: 'rejected', code: 'SHIPMENT_CHANGED' });
+    expect(await app.db.collection(C.events).countDocuments({ shipmentId: new ObjectId(shipment.id) })).toBe(0);
   });
 });

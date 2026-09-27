@@ -5,6 +5,7 @@ import { C } from '../../db/collections.js';
 import { actorOf } from '../../lib/audit.js';
 import { IdParams } from '../../lib/ids.js';
 import { toApi } from '../../lib/serialize.js';
+import { DRIVER_VISIBLE_STATUSES } from '../../lib/status.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import { DoItem } from '../orders/orders.schemas.js';
 import { podFormsFor } from '../pods/pod-form.js';
@@ -20,6 +21,11 @@ const PodFormOut = z.object({
   extraSteps: z.array(z.string()),
   fields: z.array(z.object({ key: z.string(), label: z.string(), type: z.string(), required: z.boolean(), min: z.number().optional(), max: z.number().optional(), unit: z.string().optional(), options: z.array(z.string()).optional() })),
 });
+/** Driver-visible statuses other than COMPLETED: the jobs still to accept or drive. */
+const DRIVER_ACTIVE_STATUSES = DRIVER_VISIBLE_STATUSES.filter((st) => st !== 'COMPLETED');
+/** Most recent COMPLETED shipments kept in the job list besides those needing a POD resubmission. */
+const RECENT_COMPLETED = 10;
+
 const DriverShipment = ShipmentItem.extend({ deliveryOrders: z.array(DoItem.extend({ podForm: PodFormOut })), locations: z.array(LocationLite) });
 
 export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
@@ -28,12 +34,28 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get('/driver/shipments', { schema: { tags: ['driver'], response: { 200: z.object({ items: z.array(DriverShipment) }) } }, preHandler: driverOnly }, async (req) => {
     const driverId = driverIdOf(req);
-    // COMPLETED stays listed until the shipment is CLOSED so the driver can resubmit a rejected POD (P3-R4).
-    const docs = await coll()
-      .find({ status: { $in: ['DISPATCHED', 'ACCEPTED', 'IN_TRANSIT', 'COMPLETED'] }, ...driverScope(driverId) })
-      .sort({ plannedStart: 1 })
-      .limit(50)
-      .toArray();
+    const scope = driverScope(driverId);
+    // Active jobs are queried on their own so a backlog of COMPLETED-but-unclosed shipments can
+    // never push today's DISPATCHED job past the limit. COMPLETED stays listed until CLOSED only
+    // where the driver may still act (P3-R4): a DO with a rejected POD to resubmit, plus the most
+    // recent few so a just-finished trip doesn't vanish from the phone.
+    const rejectedOn = (await app.db
+      .collection<DeliveryOrderDoc>(C.deliveryOrders)
+      .distinct('shipmentId', { status: 'POD_REJECTED', shipmentId: { $ne: null } })) as ObjectId[];
+    const [active, rejected, recent] = await Promise.all([
+      coll().find({ status: { $in: DRIVER_ACTIVE_STATUSES }, ...scope }).sort({ plannedStart: 1 }).limit(50).toArray(),
+      rejectedOn.length > 0
+        ? coll().find({ _id: { $in: rejectedOn }, status: 'COMPLETED', ...scope }).sort({ plannedStart: 1 }).limit(50).toArray()
+        : Promise.resolve([]),
+      coll().find({ status: 'COMPLETED', ...scope }).sort({ plannedStart: -1 }).limit(RECENT_COMPLETED).toArray(),
+    ]);
+    const seen = new Set<string>();
+    const docs = [...active, ...rejected, ...recent].filter((d) => {
+      const id = d._id.toHexString();
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
     const allDoIds = docs.flatMap((d) => doIdsOf(d.stops));
     const allLocIds = docs.flatMap((d) => d.stops.map((s) => s.locationId));
     const [dos, locs] = await Promise.all([

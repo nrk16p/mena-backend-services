@@ -91,4 +91,11 @@ describe('pallets', () => {
     expect(mine.items.every((m: { driverId: string }) => m.driverId === f.ids.d1)).toBe(true);
     expect(ok(await app.inject({ method: 'GET', url: `/api/v1/pallet-movements?driverId=${f.ids.d1}`, headers: f.driver2 })).items).toEqual([]);
   });
+  it('rejects a quantity above 1000 from drivers and admins with 400', async () => {
+    const tooMany = await send([move('RETURN_IN', 1001)]);
+    expect(tooMany.statusCode).toBe(400);
+    expect(ok(await send([move('RETURN_IN', 1000)])).results[0].status).toBe('accepted');
+    const correction = { tailVehicleId: f.ids.m1, typeCode: 'DEPOSIT', qty: 1001, remark: 'นับสต็อกจริง' };
+    expect((await app.inject({ method: 'POST', url: '/api/v1/pallet-movements', headers: f.admin, payload: correction })).statusCode).toBe(400);
+  });
 });

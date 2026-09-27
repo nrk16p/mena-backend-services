@@ -243,7 +243,7 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
         }
         const upd = await coll().findOneAndUpdate(
           { _id: existing._id, status: existing.status, shipmentId: existing.shipmentId },
-          { $set: { jobGroupId, jobGroupMatch: { status: 'manual', candidates: [] }, updatedBy: by, updatedAt: now } },
+          { $set: { jobGroupId, jobGroupMatch: { status: 'manual', candidates: [jobGroupId] }, updatedBy: by, updatedAt: now } },
           { returnDocument: 'after', session },
         );
         if (!upd) throw conflict('DO_CHANGED', 'The delivery order changed; reload and try again');
