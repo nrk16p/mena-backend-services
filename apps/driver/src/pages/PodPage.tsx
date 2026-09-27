@@ -13,8 +13,10 @@ import type { DriverShipment, Issue, PodField, PodFile } from '@shared/types';
 import SignaturePad from '../components/SignaturePad';
 import { getPosition } from '../lib/gps';
 import { compressImage } from '../lib/image';
+import { podPageGuard } from '../lib/podAction';
 import { keptPalletLines, podFormProblems } from '../lib/podFormProblems';
 import { uploadFile } from '../lib/upload';
+import { useJobEvents } from '../lib/useJobEvents';
 import { useWakeLock } from '../lib/useWakeLock';
 
 // A reasonable, driver-facing subset of the backend's reason-code enum (spec: SHORTAGE, OVERAGE,
@@ -55,6 +57,7 @@ export default function PodPage() {
   // after a failed attempt replays the same clientPodId instead of creating a second POD.
   const clientPodId = useMemo(() => crypto.randomUUID(), []);
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: async () => (await apiFetch<{ items: DriverShipment[] }>('GET', '/api/v1/driver/shipments')).items });
+  const events = useJobEvents(id);
   const job = jobs.data?.find((j) => j.id === id);
   const d = job?.deliveryOrders.find((x) => x.id === doId);
   const [answers, setAnswers] = useState<Record<string, unknown>>({});
@@ -72,6 +75,24 @@ export default function PodPage() {
   const uploadedRef = useRef(new Map<Blob, PodFile>());
   useWakeLock(true);
   if (!job || !d) return <p className="p-4">กำลังโหลด…</p>;
+  // events.data may still be loading its first page; treat that the same as "no steps done yet"
+  // so the guard below stays on the safe (blocking) side rather than flashing the form open.
+  if (events.isLoading) return <p className="p-4">กำลังโหลด…</p>;
+  // The DO's own drop stop — podActionState/podPageGuard need the steps recorded there, not the
+  // whole shipment's events, since a multi-stop job can have other stops' ARRIVED/UNLOAD_END too.
+  const dropStop = job.stops.find((s) => s.dropDoIds.includes(d.id));
+  const doneSteps = new Set((events.data ?? []).filter((e) => e.stopId === dropStop?.stopId).map((e) => e.code));
+  const guard = podPageGuard(doneSteps, d.status, failed);
+  if (!guard.ok) {
+    return (
+      <div className="space-y-4 p-4">
+        <p className="text-sm text-neutral-700">{guard.message}</p>
+        <Button className="h-12 w-full" onClick={() => nav(`/jobs/${job.id}`)}>
+          กลับไปหน้างาน
+        </Button>
+      </div>
+    );
+  }
   const fields = failed ? d.podForm.fields.filter((f) => f.type === 'photo') : d.podForm.fields;
   const set = (k: string, v: unknown) => setAnswers((a) => ({ ...a, [k]: v }));
 

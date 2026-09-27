@@ -8,11 +8,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError, apiFetch } from '@shared/api';
 import { STEP_TH, nextStep } from '@shared/steps';
-import type { DriverShipment, EventItem } from '@shared/types';
+import type { DriverShipment } from '@shared/types';
 import PermissionBanner from '@/components/PermissionBanner';
 import { createTapSender, type EventResult } from '../lib/events';
 import { getPosition } from '../lib/gps';
 import { podActionState } from '../lib/podAction';
+import { useJobEvents } from '../lib/useJobEvents';
 import { useWakeLock } from '../lib/useWakeLock';
 
 const REASONS = ['TRAFFIC', 'BREAKDOWN', 'WEATHER', 'CHECKPOINT', 'CONSIGNEE_CLOSED', 'NO_RECEIVER', 'WRONG_ADDRESS', 'OTHER'];
@@ -26,7 +27,7 @@ export default function JobPage() {
   const [problem, setProblem] = useState<{ code: string; reason: string; note: string } | null>(null);
   useWakeLock(true);
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: async () => (await apiFetch<{ items: DriverShipment[] }>('GET', '/api/v1/driver/shipments')).items });
-  const events = useQuery({ queryKey: ['job-events', id], queryFn: async () => (await apiFetch<{ items: EventItem[] }>('GET', `/api/v1/driver/shipments/${id}/events`)).items });
+  const events = useJobEvents(id);
   const job = jobs.data?.find((j) => j.id === id);
   const done = useMemo(() => {
     const m = new Map<string, Set<string>>();

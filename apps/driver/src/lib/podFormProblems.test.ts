@@ -29,6 +29,19 @@ describe('podFormProblems — normal delivery', () => {
     expect(podFormProblems([f], {}, { productPhoto: 3 }, false)).toEqual([]);
   });
 
+  it('rejects more than the server default max of 10 when the template sets no max', () => {
+    const f = field({ key: 'productPhoto', label: 'รูปสินค้า', type: 'photo' });
+    expect(podFormProblems([f], {}, { productPhoto: 11 }, false)).toEqual(['ถ่ายรูปได้ไม่เกิน 10 รูป: รูปสินค้า']);
+    expect(podFormProblems([f], {}, { productPhoto: 10 }, false)).toEqual([]);
+  });
+
+  it('an explicit min overrides required rather than combining with it, matching the server', () => {
+    // pod-validation.ts computes `min = f.min ?? (required ? 1 : 0)` — an explicit min of 0 wins
+    // even though the field is required, so 0 photos must NOT be flagged here.
+    const f = field({ key: 'productPhoto', label: 'รูปสินค้า', type: 'photo', required: true, min: 0 });
+    expect(podFormProblems([f], {}, {}, false)).toEqual([]);
+  });
+
   it('does not require an optional photo field', () => {
     const f = field({ key: 'extraPhoto', label: 'รูปเพิ่มเติม', type: 'photo' });
     expect(podFormProblems([f], {}, {}, false)).toEqual([]);
@@ -40,10 +53,14 @@ describe('podFormProblems — normal delivery', () => {
     expect(podFormProblems([f], {}, { sig: 1 }, false)).toEqual([]);
   });
 
-  it('requires a non-blank text field', () => {
+  it('requires a non-empty text field, matching the server which only treats undefined/null/"" as empty', () => {
     const f = field({ key: 'note', label: 'หมายเหตุ', type: 'text', required: true });
     expect(podFormProblems([f], {}, {}, false)).toEqual(['ต้องกรอก: หมายเหตุ']);
-    expect(podFormProblems([f], { note: '   ' }, {}, false)).toEqual(['ต้องกรอก: หมายเหตุ']);
+    expect(podFormProblems([f], { note: '' }, {}, false)).toEqual(['ต้องกรอก: หมายเหตุ']);
+    // A whitespace-only string is NOT flagged here: the server's `missing()` only checks for
+    // undefined/null/'', so a value of '   ' is a valid answer to it — flagging it locally would
+    // be stricter than the server.
+    expect(podFormProblems([f], { note: '   ' }, {}, false)).toEqual([]);
     expect(podFormProblems([f], { note: 'ok' }, {}, false)).toEqual([]);
   });
 
@@ -67,9 +84,13 @@ describe('podFormProblems — normal delivery', () => {
     expect(podFormProblems([f], { grade: 'A' }, {}, false)).toEqual([]);
   });
 
-  it('requires a checked checkbox when required', () => {
+  it('requires a checkbox to be answered (present) when required, matching the server\'s literal "missing === undefined" check', () => {
     const f = field({ key: 'ack', label: 'ยืนยัน', type: 'checkbox', required: true });
-    expect(podFormProblems([f], { ack: false }, {}, false)).toEqual(['ต้องยืนยัน: ยืนยัน']);
+    expect(podFormProblems([f], {}, {}, false)).toEqual(['ต้องยืนยัน: ยืนยัน']);
+    // The server (pod-validation.ts) only flags a required checkbox as missing when the answer
+    // is `undefined` — an explicit `false` is still "answered" to it, so this must accept it too,
+    // even though a naive reading of "required" might expect it to demand `true`.
+    expect(podFormProblems([f], { ack: false }, {}, false)).toEqual([]);
     expect(podFormProblems([f], { ack: true }, {}, false)).toEqual([]);
   });
 
@@ -89,12 +110,23 @@ describe('podFormProblems — normal delivery', () => {
     expect(podFormProblems([f], {}, {}, false)).toEqual([]);
   });
 
+  it('requires at least one row for a required qtyLines field when the answer is an empty array', () => {
+    const f = field({ key: 'lines', label: 'รายการ', type: 'qtyLines', required: true });
+    expect(podFormProblems([f], { lines: [] }, {}, false)).toEqual(['ต้องมีอย่างน้อย 1 แถว: รายการ']);
+  });
+
   it('requires at least one real row for a required palletLines field, ignoring blank/zero-qty rows', () => {
     const f = field({ key: 'pallets', label: 'พาเลท', type: 'palletLines', required: true });
     expect(podFormProblems([f], { pallets: [] }, {}, false)).toEqual(['ต้องมีอย่างน้อย 1 แถว: พาเลท']);
     expect(
       podFormProblems([f], { pallets: [{ type: '', qty: 5 }, { type: 'ไม้', qty: 0 }] }, {}, false),
     ).toEqual(['ต้องมีอย่างน้อย 1 แถว: พาเลท']);
+    expect(podFormProblems([f], { pallets: [{ type: 'ไม้', qty: 2 }] }, {}, false)).toEqual([]);
+  });
+
+  it('flags a fractional qty on a kept palletLines row (the server requires Number.isInteger)', () => {
+    const f = field({ key: 'pallets', label: 'พาเลท', type: 'palletLines' });
+    expect(podFormProblems([f], { pallets: [{ type: 'ไม้', qty: 2.5 }] }, {}, false)).toEqual(['จำนวนต้องเป็นจำนวนเต็ม: พาเลท']);
     expect(podFormProblems([f], { pallets: [{ type: 'ไม้', qty: 2 }] }, {}, false)).toEqual([]);
   });
 

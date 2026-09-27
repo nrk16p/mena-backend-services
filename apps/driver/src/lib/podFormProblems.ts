@@ -39,10 +39,14 @@ export function podFormProblems(fields: PodField[], answers: Record<string, unkn
   for (const f of fields) {
     switch (f.type) {
       case 'photo': {
+        // Mirrors the server's `min = f.min ?? (required ? 1 : 0)` exactly (pod-validation.ts):
+        // an explicit `min` always wins over `required`, it isn't combined with it. `max`
+        // likewise defaults to the server's 10 when the template doesn't set one.
         const count = blobCounts[f.key] ?? 0;
-        const min = Math.max(f.min ?? 0, f.required ? 1 : 0);
+        const min = f.min ?? (f.required ? 1 : 0);
+        const max = f.max ?? 10;
         if (count < min) problems.push(`ต้องถ่ายรูปอย่างน้อย ${min} รูป: ${f.label}`);
-        if (f.max !== undefined && count > f.max) problems.push(`ถ่ายรูปได้ไม่เกิน ${f.max} รูป: ${f.label}`);
+        if (count > max) problems.push(`ถ่ายรูปได้ไม่เกิน ${max} รูป: ${f.label}`);
         break;
       }
       case 'signature': {
@@ -50,7 +54,13 @@ export function podFormProblems(fields: PodField[], answers: Record<string, unkn
         break;
       }
       case 'text': {
-        if (f.required && !((answers[f.key] as string | undefined) ?? '').trim()) problems.push(`ต้องกรอก: ${f.label}`);
+        // Server's `missing()` only treats undefined/null/'' as empty — a whitespace-only string
+        // is a valid (present) text answer to it, so this doesn't trim before comparing either;
+        // trimming here would reject something the server accepts.
+        const v = answers[f.key];
+        const empty = v === undefined || v === null || v === '';
+        if (f.required && empty) problems.push(`ต้องกรอก: ${f.label}`);
+        else if (!empty && typeof v !== 'string') problems.push(`ต้องเป็นข้อความ: ${f.label}`);
         break;
       }
       case 'number': {
@@ -74,12 +84,26 @@ export function podFormProblems(fields: PodField[], answers: Record<string, unkn
         break;
       }
       case 'checkbox': {
-        if (f.required && answers[f.key] !== true) problems.push(`ต้องยืนยัน: ${f.label}`);
+        // Server's required check for checkbox is literally `v === undefined` (pod-validation.ts
+        // treats it like any other field's "missing" case) — it does not require the box to
+        // actually be checked, only answered. That reads oddly for a confirmation checkbox, but
+        // rejecting `false` here would be stricter than the server, so this matches it exactly:
+        // once the driver has touched the control at all (true or false), it's "answered".
+        if (f.required && answers[f.key] === undefined) problems.push(`ต้องยืนยัน: ${f.label}`);
         break;
       }
       case 'qtyLines': {
-        const lines = (answers[f.key] as QtyLine[] | undefined) ?? [];
-        for (const line of lines) {
+        // Pre-existing, deliberately under-strict gap (kept as-is, not part of this alignment
+        // pass): an *untouched* qtyLines field is `undefined` here — PodPage only writes to
+        // `answers` once the driver edits the input; the row it displays by default (planned ==
+        // delivered) is display-only and never lands in `answers` unless edited. The server's
+        // `missing()` treats an absent key the same as an explicit empty array and would reject
+        // it when required, so an untouched required qtyLines field can still be rejected by the
+        // server even though this local check lets it through. Only an explicit empty array is
+        // flagged here, to avoid nagging the driver about a field they never had to touch.
+        const raw = answers[f.key] as QtyLine[] | undefined;
+        if (f.required && Array.isArray(raw) && raw.length === 0) problems.push(`ต้องมีอย่างน้อย 1 แถว: ${f.label}`);
+        for (const line of raw ?? []) {
           if (typeof line.delivered !== 'number' || Number.isNaN(line.delivered) || line.delivered < 0) {
             problems.push(`จำนวนส่งจริงต้องเป็นตัวเลขไม่ติดลบ: ${f.label}`);
           }
@@ -87,8 +111,16 @@ export function podFormProblems(fields: PodField[], answers: Record<string, unkn
         break;
       }
       case 'palletLines': {
-        const rows = (answers[f.key] as PalletLine[] | undefined) ?? [];
-        if (f.required && keptPalletLines(rows).length === 0) problems.push(`ต้องมีอย่างน้อย 1 แถว: ${f.label}`);
+        // keptPalletLines mirrors what PodPage actually sends (junk rows — blank type or
+        // qty <= 0 — are stripped from the payload before it reaches the server), so checking
+        // the kept rows here matches what the server will really validate.
+        const rows = keptPalletLines((answers[f.key] as PalletLine[] | undefined) ?? []);
+        if (f.required && rows.length === 0) problems.push(`ต้องมีอย่างน้อย 1 แถว: ${f.label}`);
+        // Server also requires each row's qty to be an integer (Number.isInteger); a fractional
+        // qty survives keptPalletLines' `qty > 0` filter but would still fail server validation.
+        for (const r of rows) {
+          if (!Number.isInteger(r.qty)) problems.push(`จำนวนต้องเป็นจำนวนเต็ม: ${f.label}`);
+        }
         break;
       }
     }
