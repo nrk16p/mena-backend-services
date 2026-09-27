@@ -1,0 +1,18 @@
+export const C = {
+  counters: 'counters',
+  users: 'users',
+  refreshTokens: 'refreshTokens',
+  apiKeys: 'apiKeys',
+  auditLog: 'auditLog',
+  clients: 'clients',
+  jobGroups: 'jobGroups',
+  zones: 'zones',
+  locations: 'locations',
+  materials: 'materials',
+  serviceTypes: 'serviceTypes',
+  truckTypes: 'truckTypes',
+  vehicles: 'vehicles',
+  drivers: 'drivers',
+  palletMovementTypes: 'palletMovementTypes',
+  podTemplates: 'podTemplates',
+} as const;
