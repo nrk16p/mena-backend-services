@@ -38,6 +38,17 @@ export interface ResourceDef {
   fromDb?: (apiDoc: Obj) => Obj;
   validate?: (merged: Obj, ctx: { db: Db; existing: Document | null }) => Promise<void>;
   writeRoles?: Role[];
+  /**
+   * Human-readable singular English label used to generate the OpenAPI `summary`/`description`
+   * for this resource's CRUD routes (e.g. "vehicle" -> "Create a vehicle"). Defaults to `name`.
+   */
+  label?: string;
+  /** Plural form used in the list-route summary/description; defaults to `${label}s`. */
+  labelPlural?: string;
+  /** Thai business term shown alongside `label` in descriptions, e.g. "กลุ่มงาน" for a job group. */
+  labelTh?: string;
+  /** Extra markdown sentence(s) about this resource's special validation rules, appended to the create/update route descriptions. */
+  notes?: string;
 }
 
 function getPath(obj: Obj, path: string): unknown {
@@ -91,8 +102,47 @@ export async function prepareDoc(
   return doc;
 }
 
+/** Builds the OpenAPI summary/description text for a resource's 5 generated routes from its `ResourceDef`. */
+function buildDocs(def: ResourceDef, writeRoles: Role[]) {
+  const label = def.label ?? def.name;
+  const plural = def.labelPlural ?? `${label}s`;
+  const display = def.labelTh ? `${label} (${def.labelTh})` : label;
+  const readRolesText = 'admin, planner, or viewer';
+  const writeRolesText = writeRoles.join(', ');
+  const scopeNote = def.parent
+    ? ` Scoped to one client via the \`${def.parent.param}\` path parameter (404 \`NOT_FOUND\` if that client does not exist).`
+    : '';
+  const searchNote = def.searchFields?.length ? ` Use \`q\` to search by ${def.searchFields.join('/')}.` : '';
+  const filterNote = def.filterFields?.length ? ` Filter with ${def.filterFields.map((f) => `\`${f.name}\``).join(', ')}.` : '';
+  const notesNote = def.notes ? ` ${def.notes}` : '';
+
+  return {
+    list: {
+      summary: `List ${plural}`,
+      description: `Paginated (cursor-based, \`limit\` up to 200) list of ${display}.${scopeNote} Returns only active records by default; pass \`active=all\` or \`active=false\` to include inactive ones.${searchNote}${filterNote} Requires role ${readRolesText}.`,
+    },
+    get: {
+      summary: `Get a ${label}`,
+      description: `Fetches one ${display} by id.${scopeNote} Returns 404 \`NOT_FOUND\` if it does not exist${def.parent ? ' under that client' : ''}. Requires role ${readRolesText}.`,
+    },
+    create: {
+      summary: `Create a ${label}`,
+      description: `Creates a new ${display}, active by default.${scopeNote}${notesNote} Fails with 422 \`INVALID_REFERENCE\` if a referenced id does not exist. Requires role ${writeRolesText}.`,
+    },
+    update: {
+      summary: `Update a ${label}`,
+      description: `Partially updates a ${display}; only the fields present in the body are changed, and \`active\` can be toggled here too.${scopeNote}${notesNote} Returns 404 \`NOT_FOUND\` if it does not exist. Requires role ${writeRolesText}.`,
+    },
+    deactivate: {
+      summary: `Deactivate a ${label}`,
+      description: `Soft-deletes a ${display} by setting \`active\` to false; the record and its history are kept, not removed. Returns 404 \`NOT_FOUND\` if it does not exist. Requires role ${writeRolesText}.`,
+    },
+  };
+}
+
 export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
   const writeRoles = def.writeRoles ?? (['admin', 'planner'] as Role[]);
+  const docs = buildDocs(def, writeRoles);
   const itemSchema = def.item.extend({ id: z.string(), active: z.boolean(), createdAt: z.string(), updatedAt: z.string() });
   const parentParams = def.parent ? z.object({ [def.parent.param]: objectIdString }) : z.object({});
   const idParams = parentParams.extend({ id: objectIdString });
@@ -119,7 +169,10 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
       return { [def.parent.field]: pid };
     };
 
-    app.get(def.path, { schema: { tags: [def.name], params: parentParams, querystring: listQuery, response: { 200: pageResponse(itemSchema) } }, preHandler: readGuard }, async (req) => {
+    app.get(
+      def.path,
+      { schema: { tags: [def.name], summary: docs.list.summary, description: docs.list.description, params: parentParams, querystring: listQuery, response: { 200: pageResponse(itemSchema) } }, preHandler: readGuard },
+      async (req) => {
       const q = req.query as Obj & { limit: number; cursor?: string; q?: string; active: string };
       const filter: Document = { ...(await parentFilter(req.params as Obj)) };
       if (q.active !== 'all') filter.active = q.active === 'true';
@@ -132,18 +185,26 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
         if (v === undefined) continue;
         filter[f.name] = f.ref ? new ObjectId(v as string) : f.boolean ? v === 'true' : v;
       }
-      const page = await paginate(coll(), filter, { limit: q.limit, cursor: q.cursor });
-      return { items: page.items.map(out), nextCursor: page.nextCursor };
-    });
+        const page = await paginate(coll(), filter, { limit: q.limit, cursor: q.cursor });
+        return { items: page.items.map(out), nextCursor: page.nextCursor };
+      },
+    );
 
-    app.get(`${def.path}/:id`, { schema: { tags: [def.name], params: idParams, response: { 200: itemSchema } }, preHandler: readGuard }, async (req) => {
-      const params = req.params as Obj & { id: string };
-      const doc = await coll().findOne({ _id: new ObjectId(params.id), ...(await parentFilter(params)) });
-      if (!doc) throw notFound(def.name);
-      return out(doc);
-    });
+    app.get(
+      `${def.path}/:id`,
+      { schema: { tags: [def.name], summary: docs.get.summary, description: docs.get.description, params: idParams, response: { 200: itemSchema } }, preHandler: readGuard },
+      async (req) => {
+        const params = req.params as Obj & { id: string };
+        const doc = await coll().findOne({ _id: new ObjectId(params.id), ...(await parentFilter(params)) });
+        if (!doc) throw notFound(def.name);
+        return out(doc);
+      },
+    );
 
-    app.post(def.path, { schema: { tags: [def.name], params: parentParams, body: def.body, response: { 201: itemSchema } }, preHandler: writeGuard }, async (req, reply) => {
+    app.post(
+      def.path,
+      { schema: { tags: [def.name], summary: docs.create.summary, description: docs.create.description, params: parentParams, body: def.body, response: { 201: itemSchema } }, preHandler: writeGuard },
+      async (req, reply) => {
       const pf = await parentFilter(req.params as Obj);
       const prepared = await prepareDoc(def, app.db, req.body as Obj, null, pf);
       const now = new Date();
@@ -154,10 +215,14 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
         await writeAudit(app.db, { entity: def.name, entityId: res.insertedId.toHexString(), action: 'create', by: actorOf(req), after: toApi(created) }, { session });
         return created;
       });
-      return reply.status(201).send(out(saved));
-    });
+        return reply.status(201).send(out(saved));
+      },
+    );
 
-    app.patch(`${def.path}/:id`, { schema: { tags: [def.name], params: idParams, body: patchBody, response: { 200: itemSchema } }, preHandler: writeGuard }, async (req) => {
+    app.patch(
+      `${def.path}/:id`,
+      { schema: { tags: [def.name], summary: docs.update.summary, description: docs.update.description, params: idParams, body: patchBody, response: { 200: itemSchema } }, preHandler: writeGuard },
+      async (req) => {
       const params = req.params as Obj & { id: string };
       const pf = await parentFilter(params);
       const _id = new ObjectId(params.id);
@@ -173,12 +238,16 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
         await writeAudit(app.db, { entity: def.name, entityId: params.id, action: 'update', by: actorOf(req), before: toApi(existing), after: toApi(u) }, { session });
         return u;
       });
-      return out(updated);
-    });
+        return out(updated);
+      },
+    );
 
-    app.delete(`${def.path}/:id`, { schema: { tags: [def.name], params: idParams, response: { 200: itemSchema } }, preHandler: writeGuard }, async (req) => {
-      const params = req.params as Obj & { id: string };
-      const pf = await parentFilter(params);
+    app.delete(
+      `${def.path}/:id`,
+      { schema: { tags: [def.name], summary: docs.deactivate.summary, description: docs.deactivate.description, params: idParams, response: { 200: itemSchema } }, preHandler: writeGuard },
+      async (req) => {
+        const params = req.params as Obj & { id: string };
+        const pf = await parentFilter(params);
       const updated = await withTransaction(app.mongo, async (session) => {
         const u = await coll().findOneAndUpdate(
           { _id: new ObjectId(params.id), ...pf },
@@ -189,7 +258,8 @@ export function resourceRoutes(def: ResourceDef): FastifyPluginAsyncZod {
         await writeAudit(app.db, { entity: def.name, entityId: params.id, action: 'deactivate', by: actorOf(req) }, { session });
         return u;
       });
-      return out(updated);
-    });
+        return out(updated);
+      },
+    );
   };
 }

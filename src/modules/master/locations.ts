@@ -8,13 +8,13 @@ import { Code, Name } from './simple.js';
 const LocationBody = z.object({
   code: Code,
   name: Name,
-  clientId: objectIdString.nullable().default(null),
-  zoneId: objectIdString,
-  isSite: z.boolean().default(false),
+  clientId: objectIdString.nullable().default(null).describe('Owning client, or null for a location shared across clients.'),
+  zoneId: objectIdString.describe('Zone (โซน) this location belongs to; used for job-group and pricing zone matching.'),
+  isSite: z.boolean().default(false).describe('Whether this location can be used as a "site" criterion in job-group matching (see /clients/{clientId}/job-groups). Cannot be unset while a job group still references it as a site.'),
   address: z.string().trim().max(500).nullable().default(null),
-  lat: z.number().min(-90).max(90),
-  lng: z.number().min(-180).max(180),
-  geofenceRadiusM: z.number().int().min(50).max(5000).default(300),
+  lat: z.number().min(-90).max(90).describe('Latitude in decimal degrees; must be provided together with `lng`.'),
+  lng: z.number().min(-180).max(180).describe('Longitude in decimal degrees; must be provided together with `lat`.'),
+  geofenceRadiusM: z.number().int().min(50).max(5000).default(300).describe('Radius in meters around (lat, lng) used to detect arrival/departure at this location.'),
 });
 
 const LocationItem = LocationBody.extend({ clientId: z.string().nullable(), zoneId: z.string() });
@@ -31,6 +31,8 @@ export const locationsDef: ResourceDef = {
   ],
   searchFields: ['code', 'name', 'address'],
   filterFields: [{ name: 'zoneId', ref: true }, { name: 'clientId', ref: true }, { name: 'isSite', boolean: true }],
+  label: 'location', labelTh: 'สถานที่',
+  notes: '`lat`/`lng` must be provided together (422 `LAT_LNG_PAIR`). A location cannot have `isSite` cleared while a job group still uses it in `criteria.siteIds` (422 `LOCATION_USED_AS_SITE`).',
   toDb: (body) => {
     const { lat, lng, ...rest } = body;
     if ((lat === undefined) !== (lng === undefined)) {

@@ -27,16 +27,16 @@ const UserItem = z.object({
 
 const CreateUserBody = z.object({
   username: z.string().trim().min(1).max(100),
-  password: z.string().min(8).max(128),
-  roles: z.array(z.enum(ROLES)).min(1),
-  driverId: objectIdString.nullable().default(null),
+  password: z.string().min(8).max(128).describe('Initial password (min 8 characters); stored only as a hash.'),
+  roles: z.array(z.enum(ROLES)).min(1).describe('At least one of admin/planner/driver/viewer. Including "driver" requires `driverId`.'),
+  driverId: objectIdString.nullable().default(null).describe('Driver this account is linked to. Required and only allowed when `roles` includes "driver" and the account is active; the driver must not already be linked to another user (409 `DRIVER_ALREADY_LINKED`).'),
 });
 
 const PatchUserBody = z.object({
-  password: z.string().min(8).max(128).optional(),
+  password: z.string().min(8).max(128).optional().describe('New password; changing it revokes all of this user\'s existing sessions.'),
   roles: z.array(z.enum(ROLES)).min(1).optional(),
   driverId: objectIdString.nullable().optional(),
-  active: z.boolean().optional(),
+  active: z.boolean().optional().describe('Deactivating a user revokes all of their sessions and releases any linked `driverId`.'),
 });
 
 /** Lock document every user PATCH writes first, so concurrent ones serialise (LAST_ADMIN). */
@@ -75,7 +75,16 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get(
     '/users',
-    { schema: { tags: ['users'], querystring: PageQuery.extend({ q: z.string().optional() }), response: { 200: pageResponse(UserItem) } }, preHandler: admin },
+    {
+      schema: {
+        tags: ['users'],
+        summary: 'List users',
+        description: 'Paginated (cursor-based) list of user accounts, optionally filtered by `q` (case-insensitive match on `username`). Requires the admin role.',
+        querystring: PageQuery.extend({ q: z.string().optional().describe('Case-insensitive substring match on `username`.') }),
+        response: { 200: pageResponse(UserItem) },
+      },
+      preHandler: admin,
+    },
     async (req) => {
       const filter: Filter<UserDoc> = req.query.q ? { username: { $regex: escapeRegex(req.query.q), $options: 'i' } } : {};
       const page = await paginate(users(), filter, req.query);
@@ -83,13 +92,31 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     },
   );
 
-  app.get('/users/:id', { schema: { tags: ['users'], params: IdParams, response: { 200: UserItem } }, preHandler: admin }, async (req) => {
+  app.get(
+    '/users/:id',
+    { schema: { tags: ['users'], summary: 'Get a user', description: 'Fetches one user account by id. Returns 404 `NOT_FOUND` if it does not exist. Requires the admin role.', params: IdParams, response: { 200: UserItem } },
+    preHandler: admin,
+  }, async (req) => {
     const u = await users().findOne({ _id: new ObjectId(req.params.id) });
     if (!u) throw notFound('User');
     return safeUser(u);
   });
 
-  app.post('/users', { schema: { tags: ['users'], body: CreateUserBody, response: { 201: UserItem } }, preHandler: admin }, async (req, reply) => {
+  app.post(
+    '/users',
+    {
+      schema: {
+        tags: ['users'],
+        summary: 'Create a user',
+        description:
+          'Creates a new active user account. If `roles` includes "driver", `driverId` is required and must point to a driver not already linked to another account (409 `DRIVER_ALREADY_LINKED`); ' +
+          'a `driverId` without the "driver" role, or on an account that would be inactive, is rejected (422 `DRIVER_LINK_NOT_ALLOWED` / `DRIVER_LINK_REQUIRED`). Requires the admin role.',
+        body: CreateUserBody,
+        response: { 201: UserItem },
+      },
+      preHandler: admin,
+    },
+    async (req, reply) => {
     const driverId = req.body.driverId ? new ObjectId(req.body.driverId) : null;
     await assertDriverLink(app.db, req.body.roles, driverId, true, null);
     const by = actorOf(req);
@@ -103,7 +130,22 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     return reply.status(201).send(safeUser(u));
   });
 
-  app.patch('/users/:id', { schema: { tags: ['users'], params: IdParams, body: PatchUserBody, response: { 200: UserItem } }, preHandler: admin }, async (req) => {
+  app.patch(
+    '/users/:id',
+    {
+      schema: {
+        tags: ['users'],
+        summary: 'Update a user',
+        description:
+          'Partially updates a user account; only fields present in the body are changed. Changing `password` or setting `active: false` revokes all of the user\'s sessions. ' +
+          'Fails with 422 `LAST_ADMIN` if the change would leave zero active admins, or with the same driver-link rules as create (see `POST /users`). Returns 404 `NOT_FOUND` if the user does not exist. Requires the admin role.',
+        params: IdParams,
+        body: PatchUserBody,
+        response: { 200: UserItem },
+      },
+      preHandler: admin,
+    },
+    async (req) => {
     const _id = new ObjectId(req.params.id);
     const existing = await users().findOne({ _id });
     if (!existing) throw notFound('User');

@@ -21,8 +21,8 @@ export interface UserDoc {
 export const UserOutSchema = z.object({
   id: z.string(),
   username: z.string(),
-  roles: z.array(z.enum(ROLES)),
-  driverId: z.string().nullable(),
+  roles: z.array(z.enum(ROLES)).describe('One or more of admin/planner/driver/viewer; a user may hold several roles.'),
+  driverId: z.string().nullable().describe('Linked driver id when this user has the "driver" role and is active, otherwise null.'),
 });
 
 export type NewUserInput = { username: string; roles: Role[]; driverId?: ObjectId | null } & ({ password: string } | { passwordHash: string });
