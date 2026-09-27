@@ -3,7 +3,7 @@ import { C } from '../../db/collections.js';
 import { type RefCheck, assertActiveRefs } from '../../lib/active-refs.js';
 import { unprocessable } from '../../lib/errors.js';
 import type { Issue } from '../../lib/issues.js';
-import { matchJobGroupForDo } from '../master/job-groups.js';
+import { type JobGroupLite, type LocationLite, matchJobGroupForDo, matchJobGroupWithData } from '../master/job-groups.js';
 import type { DeliveryOrderDoc, MatchStatus, TimeWindow } from './order.types.js';
 import type { DoPatch } from './orders.schemas.js';
 
@@ -39,6 +39,43 @@ async function autoMatch(db: Db, d: DeliveryOrderDoc, truckTypeId: ObjectId | nu
 export async function rematchJobGroup(db: Db, d: DeliveryOrderDoc, truckTypeId: ObjectId | null): Promise<JobGroupFields | null> {
   if (d.jobGroupMatch.status === 'manual') return null;
   return autoMatch(db, d, truckTypeId);
+}
+
+/**
+ * Same as `rematchJobGroup`, but matches against already-fetched locations/job-groups (see
+ * `matchJobGroupWithData`) instead of querying per DO. For batched callers like
+ * `refreshJobGroups`, which re-matches every DO of a shipment in one pass.
+ */
+export function rematchJobGroupBatch(
+  d: DeliveryOrderDoc,
+  truckTypeId: ObjectId | null,
+  locById: Map<string, LocationLite>,
+  groupsByClient: Map<string, JobGroupLite[]>,
+): JobGroupFields | null {
+  if (d.jobGroupMatch.status === 'manual') return null;
+  const origin = locById.get(d.originLocationId.toHexString());
+  const dest = locById.get(d.destLocationId.toHexString());
+  if (!origin || !dest) throw unprocessable('INVALID_REFERENCE', 'origin or destination location does not exist');
+  const groups = groupsByClient.get(d.clientId.toHexString()) ?? [];
+  const r = matchJobGroupWithData(
+    { truckTypeId, serviceTypeId: d.serviceTypeId, materialId: d.materialId, originLocationId: d.originLocationId, destLocationId: d.destLocationId },
+    origin,
+    dest,
+    groups,
+  );
+  return {
+    jobGroupId: r.jobGroupId ? new ObjectId(r.jobGroupId) : null,
+    jobGroupMatch: { status: r.status, candidates: r.candidates.map((c) => new ObjectId(c)) },
+  };
+}
+
+/** Loads the truck type of a shipment's head vehicle, or null if there is no head vehicle (or it has none set). */
+async function headVehicleTruckType(db: Db, shipmentId: ObjectId): Promise<ObjectId | null> {
+  const shipment = await db.collection(C.shipments).findOne({ _id: shipmentId }, { projection: { 'head.vehicleId': 1 } });
+  const vehicleId = (shipment?.head as { vehicleId?: ObjectId } | null | undefined)?.vehicleId;
+  if (!vehicleId) return null;
+  const vehicle = await db.collection(C.vehicles).findOne({ _id: vehicleId }, { projection: { truckTypeId: 1 } });
+  return (vehicle?.truckTypeId as ObjectId | undefined) ?? null;
 }
 
 /**
@@ -123,7 +160,13 @@ export async function prepareDoFields(
   } else if (input.jobGroupId === undefined && existing?.jobGroupMatch.status === 'manual' && existing.clientId.equals(merged.clientId)) {
     jg = { jobGroupId: existing.jobGroupId, jobGroupMatch: existing.jobGroupMatch };
   } else {
-    jg = await autoMatch(db, merged, merged.intendedTruckTypeId ?? null);
+    // Truck type comes from the linked shipment's head vehicle when known (spec §3.4), so a
+    // DO already assigned to a shipment keeps matching on the vehicle's truck type even when
+    // it's edited afterwards — not just its own `intendedTruckTypeId`.
+    const truckTypeId = merged.shipmentId
+      ? ((await headVehicleTruckType(db, merged.shipmentId)) ?? merged.intendedTruckTypeId ?? null)
+      : (merged.intendedTruckTypeId ?? null);
+    jg = await autoMatch(db, merged, truckTypeId);
   }
   Object.assign(set, jg);
   return { set, warnings: jobGroupWarnings(existing?.doNo ?? null, jg.jobGroupMatch.status) };

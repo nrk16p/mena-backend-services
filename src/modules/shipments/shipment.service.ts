@@ -7,8 +7,9 @@ import { conflict, unprocessable } from '../../lib/errors.js';
 import type { Issue } from '../../lib/issues.js';
 import { toApi } from '../../lib/serialize.js';
 import { withTransaction } from '../../lib/tx.js';
+import type { JobGroupLite, LocationLite } from '../master/job-groups.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
-import { jobGroupWarnings, rematchJobGroup } from '../orders/orders.service.js';
+import { jobGroupWarnings, rematchJobGroup, rematchJobGroupBatch } from '../orders/orders.service.js';
 import { findShipmentsUsing } from './shipment.queries.js';
 import type { ShipmentInputT } from './shipment.schemas.js';
 import { EDITABLE_STATUSES } from './shipment.types.js';
@@ -63,11 +64,18 @@ export async function linkDos(db: Db, shipment: ShipmentDoc, previousDoIds: Obje
   }
   const removed = previousDoIds.filter((id) => !stopsOf.has(id.toHexString()));
   if (removed.length > 0) {
-    await coll.updateMany(
-      { _id: { $in: removed }, shipmentId: shipment._id },
-      { $set: { status: 'UNASSIGNED', shipmentId: null, pickupStopId: null, dropStopId: null, updatedAt: now } },
-      { session },
-    );
+    // Once a DO leaves a shipment, its truck type can no longer come from that shipment's
+    // vehicle (spec §3.4): re-match on `intendedTruckTypeId` alone so a stale vehicle-based
+    // match doesn't survive the DO going back into the pool.
+    const removedDos = await coll.find({ _id: { $in: removed }, shipmentId: shipment._id }, { session }).toArray();
+    for (const d of removedDos) {
+      const rematched = await rematchJobGroup(db, d, d.intendedTruckTypeId ?? null);
+      await coll.updateOne(
+        { _id: d._id, shipmentId: shipment._id },
+        { $set: { status: 'UNASSIGNED', shipmentId: null, pickupStopId: null, dropStopId: null, updatedAt: now, ...(rematched ?? {}) } },
+        { session },
+      );
+    }
   }
   for (const link of stopsOf.values()) {
     const res = await coll.updateOne(
@@ -114,19 +122,51 @@ export async function reserveResources(db: Db, shipment: ShipmentDoc, session: C
 }
 
 export async function releaseDos(db: Db, shipmentId: ObjectId, session: ClientSession): Promise<void> {
-  await db.collection<DeliveryOrderDoc>(C.deliveryOrders).updateMany(
-    { shipmentId },
-    { $set: { status: 'UNASSIGNED', shipmentId: null, pickupStopId: null, dropStopId: null, updatedAt: new Date() } },
-    { session },
-  );
+  const coll = db.collection<DeliveryOrderDoc>(C.deliveryOrders);
+  const dos = await coll.find({ shipmentId }, { session }).toArray();
+  const now = new Date();
+  for (const d of dos) {
+    // Same rule as `linkDos`: once the shipment releases the DO (e.g. cancel), its truck type
+    // can only come from `intendedTruckTypeId`, never the (now moot) shipment vehicle.
+    const rematched = await rematchJobGroup(db, d, d.intendedTruckTypeId ?? null);
+    await coll.updateOne(
+      { _id: d._id, shipmentId },
+      { $set: { status: 'UNASSIGNED', shipmentId: null, pickupStopId: null, dropStopId: null, updatedAt: now, ...(rematched ?? {}) } },
+      { session },
+    );
+  }
 }
 
+/**
+ * Re-matches every DO on the shipment (spec §3.4: truck type comes from the shipment's head
+ * vehicle when known, else the DO's own `intendedTruckTypeId`). Fetches the locations and job
+ * groups it needs once per call (one `$in` query each) instead of once per DO, since a shipment
+ * can hold up to 50 stops worth of DOs (spec §13.2).
+ */
 export async function refreshJobGroups(db: Db, shipment: ShipmentDoc, headVehicle: VehicleLite | null, session: ClientSession): Promise<Issue[]> {
   const coll = db.collection<DeliveryOrderDoc>(C.deliveryOrders);
   const dos = await coll.find({ _id: { $in: doIdsOf(shipment.stops) } }, { session }).toArray();
   const warnings: Issue[] = [];
+  if (dos.length === 0) return warnings;
+
+  const locIds = [...new Set(dos.flatMap((d) => [d.originLocationId.toHexString(), d.destLocationId.toHexString()]))].map((h) => new ObjectId(h));
+  const clientIds = [...new Set(dos.map((d) => d.clientId.toHexString()))].map((h) => new ObjectId(h));
+  const [locs, groups] = await Promise.all([
+    db.collection<LocationLite>(C.locations).find({ _id: { $in: locIds } }, { session }).toArray(),
+    db.collection<JobGroupLite>(C.jobGroups).find({ clientId: { $in: clientIds }, active: true }, { session }).toArray(),
+  ]);
+  const locById = new Map(locs.map((l) => [l._id.toHexString(), l]));
+  const groupsByClient = new Map<string, JobGroupLite[]>();
+  for (const g of groups) {
+    const key = g.clientId.toHexString();
+    const arr = groupsByClient.get(key);
+    if (arr) arr.push(g);
+    else groupsByClient.set(key, [g]);
+  }
+
   for (const d of dos) {
-    const next = await rematchJobGroup(db, d, headVehicle?.truckTypeId ?? null);
+    const truckTypeId = headVehicle?.truckTypeId ?? d.intendedTruckTypeId ?? null;
+    const next = rematchJobGroupBatch(d, truckTypeId, locById, groupsByClient);
     const status = next ? next.jobGroupMatch.status : d.jobGroupMatch.status;
     if (next) await coll.updateOne({ _id: d._id }, { $set: next }, { session });
     warnings.push(...jobGroupWarnings(d.doNo, status));
@@ -140,7 +180,12 @@ export function invalid(errors: Issue[], warnings: Issue[]) {
   return unprocessable('SHIPMENT_INVALID', 'The shipment breaks planning rules', { errors, warnings });
 }
 
-export async function createShipment(app: FastifyInstance, input: ShipmentInputT, by: string): Promise<{ doc: ShipmentDoc; warnings: Issue[] }> {
+export async function createShipment(
+  app: FastifyInstance,
+  input: ShipmentInputT,
+  by: string,
+  opts?: { timeoutMS?: number },
+): Promise<{ doc: ShipmentDoc; warnings: Issue[] }> {
   const draft = await toDraft(app.db, input);
   const result = await validateShipment(app.db, draft, { mode: 'draft' });
   if (result.errors.length > 0) throw invalid(result.errors, result.warnings);
@@ -181,7 +226,7 @@ export async function createShipment(app: FastifyInstance, input: ShipmentInputT
     doc.warnings = fresh;
     await writeAudit(app.db, { entity: 'shipment', entityId: doc._id.toHexString(), action: 'create', by, after: toApi(doc) }, { session });
     return fresh;
-  });
+  }, opts);
   return { doc, warnings };
 }
 
@@ -293,9 +338,12 @@ export async function transition(
     );
     if (!updated) throw versionConflict();
     if (opts.releaseDos) await releaseDos(app.db, existing._id, session);
+    // `after` includes every field the caller actually set (e.g. `driverResponse` with a decline
+    // reason, or `dispatch`), not just `status`, so the audit trail shows what changed.
+    const changed = Object.fromEntries(Object.keys(opts.set).map((k) => [k, (updated as unknown as Record<string, unknown>)[k]]));
     await writeAudit(
       app.db,
-      { entity: 'shipment', entityId: existing._id.toHexString(), action: opts.action, by: opts.by, before: { status: existing.status }, after: { status: updated.status } },
+      { entity: 'shipment', entityId: existing._id.toHexString(), action: opts.action, by: opts.by, before: { status: existing.status }, after: toApi(changed) },
       { session },
     );
     return updated;

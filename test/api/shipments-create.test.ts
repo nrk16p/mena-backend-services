@@ -106,6 +106,23 @@ describe('create and read shipments', () => {
     expect(stored?.jobGroupId.toHexString()).toBe(g.json().id);
   });
 
+  it('refreshJobGroups falls back to intendedTruckTypeId when no head vehicle is assigned yet (spec §3.4)', async () => {
+    const g = await app.inject({
+      method: 'POST', url: `/api/v1/clients/${f.ids.cpac}/job-groups`, headers: f.admin,
+      payload: { code: 'TRAILER-ONLY', name: 'Trailer jobs', criteria: { truckTypeIds: [f.ids.trailerType] } },
+    });
+    const d = await createDo(app, f, { clientId: f.ids.cpac, materialId: f.ids.bag, intendedTruckTypeId: f.ids.trailerType });
+    expect(d.jobGroupMatch).toEqual({ status: 'auto', candidates: [g.json().id] });
+    // No head/tail: the shipment stays DRAFT with no known vehicle, so refreshJobGroups must not
+    // discard the DO's intendedTruckTypeId-based match just because headVehicle is null.
+    const sh = await postShipment(app, f, { plannedStart: day(17, 6), plannedEnd: day(17, 18), doIds: [d.id] });
+    expect(sh.statusCode).toBe(201);
+    expect(sh.json().warnings.map((w: { code: string }) => w.code)).not.toContain('JOB_GROUP_NONE');
+    const stored = await app.db.collection(C.deliveryOrders).findOne({ doNo: d.doNo });
+    expect(stored?.jobGroupMatch.status).toBe('auto');
+    expect(stored?.jobGroupId?.toHexString()).toBe(g.json().id);
+  });
+
   it('lists shipments with filters', async () => {
     const list = await app.inject({ method: 'GET', url: `/api/v1/shipments?vehicleId=${f.ids.h1}&status=DRAFT`, headers: f.viewer });
     expect(list.statusCode).toBe(200);

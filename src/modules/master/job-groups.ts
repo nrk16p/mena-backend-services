@@ -61,17 +61,28 @@ export interface DoMatchFields {
   destLocationId: ObjectId;
 }
 
-type CriteriaDoc = { [K in keyof JobGroupCriteria]: ObjectId[] };
+export type CriteriaDoc = { [K in keyof JobGroupCriteria]: ObjectId[] };
 
-export async function matchJobGroupForDo(db: Db, clientId: ObjectId, f: DoMatchFields): Promise<MatchResult> {
-  const locs = await db
-    .collection(C.locations)
-    .find({ _id: { $in: [f.originLocationId, f.destLocationId] } })
-    .toArray();
-  const origin = locs.find((l) => l._id.equals(f.originLocationId));
-  const dest = locs.find((l) => l._id.equals(f.destLocationId));
-  if (!origin || !dest) throw unprocessable('INVALID_REFERENCE', 'origin or destination location does not exist');
-  const groups = await db.collection(C.jobGroups).find({ clientId, active: true }).toArray();
+/** Lean shape of a `locations` document, as needed for job-group matching. */
+export interface LocationLite {
+  _id: ObjectId;
+  isSite?: boolean;
+  zoneId: ObjectId;
+}
+
+/** Lean shape of a `jobGroups` document, as needed for job-group matching. */
+export interface JobGroupLite {
+  _id: ObjectId;
+  clientId: ObjectId;
+  criteria: CriteriaDoc;
+}
+
+/**
+ * Matches a DO against already-fetched locations/job-groups. Pulled out of `matchJobGroupForDo`
+ * so batched callers (e.g. `refreshJobGroups`, which matches every DO of a shipment) can fetch
+ * locations and job groups once with `$in` and match in memory, instead of re-querying per DO.
+ */
+export function matchJobGroupWithData(f: DoMatchFields, origin: LocationLite, dest: LocationLite, groups: JobGroupLite[]): MatchResult {
   const hex = (list: ObjectId[] = []) => list.map((i) => i.toHexString());
   return matchJobGroup(
     {
@@ -79,11 +90,11 @@ export async function matchJobGroupForDo(db: Db, clientId: ObjectId, f: DoMatchF
       serviceTypeId: f.serviceTypeId.toHexString(),
       materialId: f.materialId.toHexString(),
       siteIds: [origin, dest].filter((l) => l.isSite === true).map((l) => l._id.toHexString()),
-      originZoneId: (origin.zoneId as ObjectId).toHexString(),
-      destZoneId: (dest.zoneId as ObjectId).toHexString(),
+      originZoneId: origin.zoneId.toHexString(),
+      destZoneId: dest.zoneId.toHexString(),
     },
     groups.map((g) => {
-      const c = g.criteria as CriteriaDoc;
+      const c = g.criteria;
       return {
         id: g._id.toHexString(),
         criteria: {
@@ -97,6 +108,18 @@ export async function matchJobGroupForDo(db: Db, clientId: ObjectId, f: DoMatchF
       };
     }),
   );
+}
+
+export async function matchJobGroupForDo(db: Db, clientId: ObjectId, f: DoMatchFields): Promise<MatchResult> {
+  const locs = await db
+    .collection<LocationLite>(C.locations)
+    .find({ _id: { $in: [f.originLocationId, f.destLocationId] } })
+    .toArray();
+  const origin = locs.find((l) => l._id.equals(f.originLocationId));
+  const dest = locs.find((l) => l._id.equals(f.destLocationId));
+  if (!origin || !dest) throw unprocessable('INVALID_REFERENCE', 'origin or destination location does not exist');
+  const groups = await db.collection<JobGroupLite>(C.jobGroups).find({ clientId, active: true }).toArray();
+  return matchJobGroupWithData(f, origin, dest, groups);
 }
 
 const MatchBody = z.object({

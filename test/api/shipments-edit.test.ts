@@ -65,6 +65,56 @@ describe('edit, plan and cancel shipments', () => {
     expect(await app.db.collection(C.auditLog).countDocuments({ entity: 'shipment', entityId: sh.id, action: 'cancel' })).toBe(1);
   });
 
+  it('refuses to cancel an already-cancelled shipment (SHIPMENT_NOT_CANCELLABLE)', async () => {
+    const d = await createDo(app, f);
+    const sh = (await postShipment(app, f, { plannedStart: day(11, 6), plannedEnd: day(11, 18), head: { vehicleId: f.ids.m1, driverId: f.ids.d1 }, doIds: [d.id] })).json();
+    const cancelled = await action(sh.id, 'cancel', { version: 1, reason: 'ยกเลิกครั้งแรก' });
+    expect(cancelled.statusCode).toBe(200);
+    const again = await action(sh.id, 'cancel', { version: cancelled.json().version, reason: 'ยกเลิกซ้ำ' });
+    expect(again.statusCode).toBe(422);
+    expect(again.json().code).toBe('SHIPMENT_NOT_CANCELLABLE');
+  });
+
+  it('re-matches a DO removed from a shipment using only intendedTruckTypeId, not the old vehicle-based match (spec §3.4)', async () => {
+    const g = await app.inject({
+      method: 'POST', url: `/api/v1/clients/${f.ids.cpac}/job-groups`, headers: f.admin,
+      payload: { code: 'MIXER-EDIT', name: 'Mixer only', criteria: { truckTypeIds: [f.ids.mixerType] } },
+    });
+    const kept = await createDo(app, f, { clientId: f.ids.cpac, materialId: f.ids.bag });
+    const removed = await createDo(app, f, { clientId: f.ids.cpac, materialId: f.ids.bag, destLocationId: f.ids.locC });
+    const sh = (
+      await postShipment(app, f, { plannedStart: day(13, 6), plannedEnd: day(13, 18), head: { vehicleId: f.ids.m1, driverId: f.ids.d2 }, doIds: [kept.id, removed.id] })
+    ).json();
+    expect((await app.db.collection(C.deliveryOrders).findOne({ doNo: removed.doNo }))?.jobGroupMatch.status).toBe('auto');
+
+    const edited = await patch(sh.id, { version: 1, doIds: [kept.id] });
+    expect(edited.statusCode).toBe(200);
+    const stored = await app.db.collection(C.deliveryOrders).findOne({ doNo: removed.doNo });
+    expect(stored).toMatchObject({ status: 'UNASSIGNED', shipmentId: null });
+    expect(stored?.jobGroupMatch.status).toBe('none'); // the vehicle-based match must not survive removal from the shipment
+    expect(g.statusCode).toBe(201);
+  });
+
+  it('re-matches a DO released by a cancelled shipment using only intendedTruckTypeId, not the old vehicle-based match (spec §3.4)', async () => {
+    // Client SCG here (not CPAC, already given a same-criteria 'MIXER-EDIT' group by the
+    // previous test, which would otherwise tie with this one and match 'ambiguous'). Material
+    // 'bag' keeps this DO clear of SCG's own 'bulkGroup' (materialIds: [bulk], siteIds: [locA]).
+    const g = await app.inject({
+      method: 'POST', url: `/api/v1/clients/${f.ids.scg}/job-groups`, headers: f.admin,
+      payload: { code: 'MIXER-CANCEL', name: 'Mixer only', criteria: { truckTypeIds: [f.ids.mixerType] } },
+    });
+    const d = await createDo(app, f, { materialId: f.ids.bag });
+    const sh = (await postShipment(app, f, { plannedStart: day(15, 6), plannedEnd: day(15, 18), head: { vehicleId: f.ids.m1, driverId: f.ids.d2 }, doIds: [d.id] })).json();
+    expect((await app.db.collection(C.deliveryOrders).findOne({ doNo: d.doNo }))?.jobGroupMatch.status).toBe('auto');
+
+    const cancelled = await action(sh.id, 'cancel', { version: 1, reason: 'ทดสอบยกเลิก' });
+    expect(cancelled.statusCode).toBe(200);
+    const stored = await app.db.collection(C.deliveryOrders).findOne({ doNo: d.doNo });
+    expect(stored).toMatchObject({ status: 'UNASSIGNED', shipmentId: null });
+    expect(stored?.jobGroupMatch.status).toBe('none');
+    expect(g.statusCode).toBe(201);
+  });
+
   it('serializes concurrent edits that both move onto the same vehicle/window (Ruling P2-R6)', async () => {
     const d1 = await createDo(app, f);
     const d2 = await createDo(app, f);
