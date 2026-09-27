@@ -5,10 +5,10 @@ import { type UserDoc, UserOutSchema, userOut } from '../users/users.repo.js';
 import { issueRefreshToken } from './refresh-tokens.js';
 
 export const TokenResponseSchema = z.object({
-  accessToken: z.string(),
-  refreshToken: z.string(),
+  accessToken: z.string().describe('JWT access token; send it as `Authorization: Bearer <accessToken>` on subsequent requests.'),
+  refreshToken: z.string().describe('Opaque refresh token, as `<id>.<secret>`; exchange it at `POST /auth/refresh` for a new pair before/after `accessToken` expires. Single-use: exchanging it invalidates it.'),
   tokenType: z.literal('Bearer'),
-  expiresIn: z.number(),
+  expiresIn: z.number().describe('Seconds until `accessToken` expires.'),
   user: UserOutSchema,
 });
 

@@ -13,15 +13,23 @@ import { assertFamilyCurrent, revokeAllForUser, revokeRefreshToken, rotateRefres
 const LoginBody = z.object({
   username: z.string().trim().min(1),
   password: z.string().min(1).max(128),
-  lat: z.number().min(-90).max(90).optional(),
-  lng: z.number().min(-180).max(180).optional(),
+  lat: z.number().min(-90).max(90).optional().describe('Optional device latitude recorded on `lastLogin`, e.g. from a driver\'s phone.'),
+  lng: z.number().min(-180).max(180).optional().describe('Optional device longitude recorded on `lastLogin`.'),
 });
 
 export const authRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/auth/login',
     {
-      schema: { tags: ['auth'], body: LoginBody, response: { 200: TokenResponseSchema } },
+      schema: {
+        tags: ['auth'],
+        summary: 'Log in and get tokens',
+        description:
+          'Verifies username/password and returns an access token (JWT, short-lived) plus a refresh token. No role is required to call this — it is the entry point for every principal kind. ' +
+          'Fails with 401 `INVALID_CREDENTIALS` for a wrong username/password or an inactive user. Rate-limited per IP+username to slow down credential stuffing.',
+        body: LoginBody,
+        response: { 200: TokenResponseSchema },
+      },
       config: {
         rateLimit: {
           max: app.config.LOGIN_RATE_LIMIT_PER_MIN,
@@ -55,7 +63,15 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get(
     '/me',
-    { schema: { tags: ['auth'], response: { 200: UserOutSchema } }, preHandler: app.requireRoles() },
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Get the current user',
+        description: 'Returns the profile of the user identified by the bearer access token. Requires any authenticated user (no specific role); fails with 401 if the token is missing, invalid/expired, or the user is inactive.',
+        response: { 200: UserOutSchema },
+      },
+      preHandler: app.requireRoles(),
+    },
     async (req) => {
       if (req.principal?.kind !== 'user') throw unauthorized();
       const user = await findUserById(app.db, new ObjectId(req.principal.userId));
@@ -64,11 +80,21 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     },
   );
 
-  const RefreshBody = z.object({ refreshToken: z.string().min(1) });
+  const RefreshBody = z.object({ refreshToken: z.string().min(1).describe('Refresh token previously issued by login or a prior refresh, as `<id>.<secret>`.') });
 
   app.post(
     '/auth/refresh',
-    { schema: { tags: ['auth'], body: RefreshBody, response: { 200: TokenResponseSchema } } },
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Rotate a refresh token for a new access token',
+        description:
+          'Exchanges a still-valid refresh token for a new access/refresh token pair (rotation: the old refresh token is consumed). No role required, since the caller is not yet holding an access token. ' +
+          'Fails with 401 `INVALID_REFRESH_TOKEN` if unknown/expired, `USER_INACTIVE` if the user was deactivated, or `REFRESH_TOKEN_REUSED` if a token already consumed (outside its short reuse-grace window) is replayed — that also revokes the whole token family, forcing a fresh login.',
+        body: RefreshBody,
+        response: { 200: TokenResponseSchema },
+      },
+    },
     async (req) => {
       const { userId, familyId } = await rotateRefreshToken(app.db, req.body.refreshToken, app.config.REFRESH_REUSE_GRACE_SEC);
       const user = await findUserById(app.db, userId);
@@ -78,7 +104,17 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     },
   );
 
-  app.post('/auth/logout', { schema: { tags: ['auth'], body: RefreshBody } }, async (req, reply) => {
+  app.post(
+    '/auth/logout',
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Log out (revoke a refresh token)',
+        description: 'Revokes the given refresh token and its whole rotation family, so it (and any token rotated from it) can no longer be used. Always returns 204, even if the token was already invalid. No role required.',
+        body: RefreshBody,
+      },
+    },
+    async (req, reply) => {
     await revokeRefreshToken(app.db, req.body.refreshToken);
     return reply.status(204).send();
   });
@@ -88,7 +124,14 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['auth'],
-        body: z.object({ currentPassword: z.string().min(1), newPassword: z.string().min(8).max(128) }),
+        summary: 'Change the current user\'s password',
+        description:
+          'Changes the caller\'s own password after verifying `currentPassword`, and revokes every refresh token/session for this user (the caller must log in again on other devices). ' +
+          'Requires any authenticated user. Fails with 422 `INVALID_CURRENT_PASSWORD` if `currentPassword` is wrong.',
+        body: z.object({
+          currentPassword: z.string().min(1).describe('The user\'s existing password, for verification.'),
+          newPassword: z.string().min(8).max(128).describe('The new password to set (min 8 characters).'),
+        }),
       },
       preHandler: app.requireRoles(),
     },

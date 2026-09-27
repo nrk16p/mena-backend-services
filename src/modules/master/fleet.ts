@@ -20,11 +20,11 @@ export function plateKey(p: string): string {
 export const VEHICLE_PARTS = ['head', 'tail', 'rigid'] as const;
 
 const VehicleBody = z.object({
-  plate: z.string().trim().min(2).max(20),
-  part: z.enum(VEHICLE_PARTS),
-  truckTypeId: objectIdString,
-  gpsVendor: z.string().trim().max(40).nullable().default(null),
-  gpsId: z.string().trim().max(60).nullable().default(null),
+  plate: z.string().trim().min(2).max(20).describe('License plate as entered by staff; normalized (uppercased, whitespace collapsed) and also matched loosely (ignoring spaces/"-"/".") against existing vehicles to catch duplicates.'),
+  part: z.enum(VEHICLE_PARTS).describe('Physical unit this record represents: "head" or "tail" of an articulated (tractor) truck, or "rigid" for a single-unit truck. Must agree with the linked truck type\'s category.'),
+  truckTypeId: objectIdString.describe('Id of the truck type (see /truck-types); its category (tractor/rigid) must match `part`.'),
+  gpsVendor: z.string().trim().max(40).nullable().default(null).describe('GPS tracking vendor key for this vehicle, if any (used to route location updates), otherwise null.'),
+  gpsId: z.string().trim().max(60).nullable().default(null).describe('Vehicle identifier as known to the GPS vendor, otherwise null.'),
 });
 
 export const vehiclesDef: ResourceDef = {
@@ -36,6 +36,8 @@ export const vehiclesDef: ResourceDef = {
   refs: [{ path: 'truckTypeId', collection: C.truckTypes }],
   searchFields: ['plate', 'gpsId'],
   filterFields: [{ name: 'part' }, { name: 'truckTypeId', ref: true }],
+  label: 'vehicle', labelTh: 'รถ',
+  notes: '`part` must match the linked truck type\'s category ("rigid" part <-> "rigid" truck type, "head"/"tail" <-> "tractor" truck type), otherwise 422 `PART_CATEGORY_MISMATCH`.',
   toDb: (body) =>
     typeof body.plate === 'string' ? { ...body, plate: normalizePlate(body.plate), plateKey: plateKey(body.plate) } : body,
   validate: async (merged, { db }) => {
@@ -53,8 +55,8 @@ const DriverBody = z.object({
   name: Name,
   phone: z.string().trim().max(30).nullable().default(null),
   licenseType: z.string().trim().max(30).nullable().default(null),
-  licenseExpiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be YYYY-MM-DD').nullable().default(null),
-  weeklyDaysOff: z.array(z.number().int().min(0).max(6)).max(7).default([]),
+  licenseExpiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be YYYY-MM-DD').nullable().default(null).describe('Driving license expiry date as `YYYY-MM-DD`, or null if not tracked.'),
+  weeklyDaysOff: z.array(z.number().int().min(0).max(6)).max(7).default([]).describe('Recurring days off each week, as 0 (Sunday) through 6 (Saturday); used when checking driver availability.'),
 });
 
 export const driversDef: ResourceDef = {
@@ -64,4 +66,5 @@ export const driversDef: ResourceDef = {
   body: DriverBody,
   item: DriverBody,
   searchFields: ['code', 'name', 'phone'],
+  label: 'driver', labelTh: 'พนักงานขับรถ',
 };

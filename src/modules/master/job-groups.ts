@@ -11,8 +11,19 @@ import { Code, Name } from './simple.js';
 
 const ids = z.array(objectIdString).default([]);
 const Criteria = z
-  .object({ truckTypeIds: ids, serviceTypeIds: ids, siteIds: ids, materialIds: ids, originZoneIds: ids, destZoneIds: ids })
-  .default({});
+  .object({
+    truckTypeIds: ids.describe('Truck types this job group applies to; empty = any truck type.'),
+    serviceTypeIds: ids.describe('Service types this job group applies to; empty = any service type.'),
+    siteIds: ids.describe('Locations (must have `isSite: true`) this job group applies to; empty = any site. A delivery order matches if either its origin or destination is one of these sites.'),
+    materialIds: ids.describe('Materials this job group applies to; empty = any material.'),
+    originZoneIds: ids.describe('Origin zones this job group applies to; empty = any origin zone.'),
+    destZoneIds: ids.describe('Destination zones this job group applies to; empty = any destination zone.'),
+  })
+  .default({})
+  .describe(
+    'Matching criteria (จับคู่กลุ่มงาน): each non-empty list is an OR-of-allowed-values filter, and all non-empty lists must match (AND) for a delivery order to hit this job group. ' +
+      'When several job groups match the same order, the one with the most non-empty criteria lists (highest specificity) wins; a tie is reported as ambiguous.',
+  );
 
 const JobGroupBody = z.object({ code: Code, name: Name, criteria: Criteria });
 const JobGroupItem = z.object({
@@ -45,6 +56,8 @@ export const jobGroupsDef: ResourceDef = {
     { path: 'criteria.destZoneIds', collection: C.zones, many: true },
   ],
   searchFields: ['code', 'name'],
+  label: 'job group', labelTh: 'กลุ่มงาน',
+  notes: 'Every id in `criteria.siteIds` must reference a location with `isSite: true` (422 `NOT_A_SITE`). See `POST /clients/{clientId}/job-groups/match` for how criteria are matched against a delivery order.',
   validate: async (merged, { db }) => {
     const siteIds = ((merged.criteria as { siteIds?: ObjectId[] } | undefined)?.siteIds ?? []) as ObjectId[];
     if (siteIds.length === 0) return;
@@ -131,16 +144,27 @@ const MatchBody = z.object({
 });
 
 const MatchResultSchema = z.object({
-  status: z.enum(['auto', 'ambiguous', 'none']),
-  jobGroupId: z.string().nullable(),
-  candidates: z.array(z.string()),
+  status: z.enum(['auto', 'ambiguous', 'none']).describe(
+    '"auto": exactly one job group had the highest specificity and was picked; "ambiguous": two or more job groups tied for highest specificity, a planner must pick one from `candidates`; "none": no job group matched.',
+  ),
+  jobGroupId: z.string().nullable().describe('The matched job group id when `status` is "auto", otherwise null.'),
+  candidates: z.array(z.string()).describe('For "auto": every job group that matched (winner included). For "ambiguous": only the job groups tied at the highest specificity. For "none": empty.'),
 });
 
 export const jobGroupMatchRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/clients/:clientId/job-groups/match',
     {
-      schema: { tags: ['jobGroup'], params: z.object({ clientId: objectIdString }), body: MatchBody, response: { 200: MatchResultSchema } },
+      schema: {
+        tags: ['jobGroup'],
+        summary: 'Match a delivery order to a job group',
+        description:
+          'Finds which job group (กลุ่มงาน) of this client matches the given truck type/service type/material/origin/destination combination, using the same criteria matching applied when delivery orders are created. ' +
+          'The job group with the most non-empty matching criteria wins (see `status`); a tie is reported as "ambiguous". Returns 404 `NOT_FOUND` if the client does not exist. Requires role admin, planner, or viewer.',
+        params: z.object({ clientId: objectIdString }),
+        body: MatchBody,
+        response: { 200: MatchResultSchema },
+      },
       preHandler: app.requireRoles(...STAFF_ROLES),
     },
     async (req) => {

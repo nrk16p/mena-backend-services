@@ -13,26 +13,28 @@ import { withTransaction } from '../../lib/tx.js';
 import { type BlockDoc, RESOURCE_TYPES, prepareBlock } from './blocks.service.js';
 import { LEVEL1 } from './status-codes.js';
 
-const iso = z.string().datetime({ offset: true });
+const iso = z.string().datetime({ offset: true }).describe('UTC ISO 8601 timestamp with offset, e.g. "2026-09-27T08:00:00Z".');
 
 const BlockItem = z.object({
   id: z.string(),
   resourceType: z.enum(RESOURCE_TYPES),
   resourceId: z.string(),
-  statusCode: z.string(),
-  level1: z.enum(LEVEL1),
-  blocksAssignment: z.boolean(),
-  from: z.string(),
-  to: z.string(),
+  statusCode: z.string().describe('Status code (see /status-codes) that classifies this block; must be active and applicable to `resourceType`.'),
+  level1: z.enum(LEVEL1).describe('Copied from the status code: "working" or "not_working".'),
+  blocksAssignment: z.boolean().describe('Copied from the status code: whether this block prevents assigning the resource to a shipment during its period.'),
+  from: z.string().describe('UTC ISO start of the block period.'),
+  to: z.string().describe('UTC ISO end of the block period; must be after `from`.'),
   note: z.string().nullable(),
-  source: z.enum(['manual', 'atms', 'hr']),
-  cancelledAt: z.string().nullable(),
+  source: z.enum(['manual', 'atms', 'hr']).describe('Who created this block: "manual" (a planner/admin via this API), "atms", or "hr" (synced from those external systems).'),
+  cancelledAt: z.string().nullable().describe('UTC ISO time the block was cancelled, or null while still active. A cancelled block can no longer be changed.'),
   createdBy: z.string(),
   createdAt: z.string(),
   updatedBy: z.string(),
   updatedAt: z.string(),
 });
-const BlockWithWarnings = BlockItem.extend({ warnings: z.array(IssueSchema) });
+const BlockWithWarnings = BlockItem.extend({
+  warnings: z.array(IssueSchema).describe('Non-fatal `SHIPMENT_CONFLICT` warnings: shipments that already use this resource during the block period and may now need reassignment.'),
+});
 
 export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
   const read = app.requireRoles(...STAFF_ROLES);
@@ -49,6 +51,11 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['availability'],
+        summary: 'Create a resource block',
+        description:
+          'Marks a vehicle or driver unavailable (or working under a special status) for a time period, using a status code (see /status-codes) to drive `level1`/`blocksAssignment`. ' +
+          'Returns warnings (not errors) for any shipment already using this resource during the period. Fails with 422 `INVALID_RANGE` if `to` is not after `from`, `INVALID_REFERENCE` for an unknown/inactive resource, ' +
+          '`INVALID_REFERENCE` for an unknown status code, or `STATUS_CODE_NOT_APPLICABLE` if the status code does not apply to this resource type. Requires role admin or planner.',
         body: z.object({
           resourceType: z.enum(RESOURCE_TYPES),
           resourceId: objectIdString,
@@ -83,11 +90,15 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['availability'],
+        summary: 'List resource blocks',
+        description:
+          'Paginated (cursor-based) list of vehicle/driver unavailability blocks, optionally filtered by resource and/or overlap with a `from`/`to` window. ' +
+          'Excludes cancelled blocks unless `includeCancelled=true`. Requires role admin, planner, or viewer.',
         querystring: PageQuery.extend({
           resourceType: z.enum(RESOURCE_TYPES).optional(),
           resourceId: objectIdString.optional(),
-          from: iso.optional(),
-          to: iso.optional(),
+          from: iso.optional().describe('Only return blocks whose period ends after this time.'),
+          to: iso.optional().describe('Only return blocks whose period starts before this time.'),
           includeCancelled: z.enum(['true', 'false']).default('false'),
         }),
         response: { 200: pageResponse(BlockItem) },
@@ -112,6 +123,10 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['availability'],
+        summary: 'Update a resource block',
+        description:
+          'Partially updates an active (not cancelled) resource block; only fields present in the body are changed, and validation/warnings are re-evaluated on the merged period and status code. ' +
+          'Fails with 422 `BLOCK_CANCELLED` if the block was already cancelled, plus the same range/reference errors as create. Requires role admin or planner.',
         params: IdParams,
         body: z.object({
           statusCode: z.string().trim().min(1).max(20).optional(),
@@ -147,7 +162,19 @@ export const blockRoutes: FastifyPluginAsyncZod = async (app) => {
     },
   );
 
-  app.post('/resource-blocks/:id/cancel', { schema: { tags: ['availability'], params: IdParams, response: { 200: BlockItem } }, preHandler: write }, async (req) => {
+  app.post(
+    '/resource-blocks/:id/cancel',
+    {
+      schema: {
+        tags: ['availability'],
+        summary: 'Cancel a resource block',
+        description: 'Marks a resource block as cancelled (setting `cancelledAt`) so the resource is no longer considered blocked for that period. Fails with 422 `BLOCK_CANCELLED` if already cancelled. Requires role admin or planner.',
+        params: IdParams,
+        response: { 200: BlockItem },
+      },
+      preHandler: write,
+    },
+    async (req) => {
     const existing = await load(req.params.id);
     if (existing.cancelledAt) throw unprocessable('BLOCK_CANCELLED', 'The block is already cancelled');
     const by = actorOf(req);
