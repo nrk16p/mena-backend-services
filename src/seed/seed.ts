@@ -1,5 +1,9 @@
-import type { Db, Document, ObjectId } from 'mongodb';
+import { ObjectId } from 'mongodb';
+import type { Db, Document } from 'mongodb';
 import { C } from '../db/collections.js';
+import { nextNumber } from '../lib/counters.js';
+import type { Role } from '../lib/roles.js';
+import { normalizePlate, plateKey } from '../modules/master/fleet.js';
 import { createUser, findUserByUsername } from '../modules/users/users.repo.js';
 
 export const BASE_TRUCK_TYPES = [
@@ -79,7 +83,13 @@ export async function seedAdmin(
   return 'restored';
 }
 
-export async function seedDemo(db: Db): Promise<void> {
+/** "Today" at 08:00 Bangkok time, as a UTC `Date` — used for the demo's already-dispatched shipment. */
+function bangkokTodayAt(hour: number): Date {
+  const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  return new Date(`${ymd}T${String(hour).padStart(2, '0')}:00:00+07:00`);
+}
+
+export async function seedDemo(db: Db, opts: { password: string }): Promise<void> {
   await seedBase(db);
   const clientId = await upsertByCode(db, C.clients, { code: 'DEMO', name: 'Demo Client' });
   const zBkk = await upsertByCode(db, C.zones, { code: 'BKK', name: 'กรุงเทพฯ' });
@@ -125,4 +135,96 @@ export async function seedDemo(db: Db): Promise<void> {
     },
     { upsert: true },
   );
+
+  // --- Fleet, drivers and demo user accounts (Task 11) ---
+  const trailer = (await db.collection(C.truckTypes).findOne({ code: 'TRAILER' }))!._id as ObjectId;
+  const kkn = await upsertByCode(db, C.locations, {
+    code: 'DEMO-SHOP-KKN', name: 'ร้านวัสดุ ขอนแก่น', clientId, zoneId: zCen, isSite: false, address: 'Khon Kaen',
+    geo: { type: 'Point', coordinates: [102.83, 16.43] }, geofenceRadiusM: 300,
+  });
+  const upsertVehicle = async (plate: string, part: string, truckTypeId: ObjectId) => {
+    const now2 = new Date();
+    await db.collection(C.vehicles).updateOne(
+      { plateKey: plateKey(plate) },
+      { $setOnInsert: { plate: normalizePlate(plate), plateKey: plateKey(plate), part, truckTypeId, gpsVendor: null, gpsId: null, active: true, createdAt: now2, updatedAt: now2 } },
+      { upsert: true },
+    );
+  };
+  await upsertVehicle('70-1001', 'head', trailer);
+  await upsertVehicle('70-1002', 'head', trailer);
+  await upsertVehicle('71-2001', 'tail', trailer);
+  await upsertVehicle('71-2002', 'tail', trailer);
+  await upsertVehicle('80-3001', 'rigid', mixer);
+  await upsertVehicle('80-3002', 'rigid', mixer);
+  const d1 = await upsertByCode(db, C.drivers, { code: 'DRV-001', name: 'สมชาย ใจดี', phone: '0810000001', licenseType: 'ท.4', licenseExpiry: '2030-12-31', weeklyDaysOff: [] });
+  const d2 = await upsertByCode(db, C.drivers, { code: 'DRV-002', name: 'สมศักดิ์ ขยัน', phone: '0810000002', licenseType: 'ท.4', licenseExpiry: '2030-12-31', weeklyDaysOff: [0] });
+  const ensureUser = async (username: string, roles: Role[], driverId: ObjectId | null) => {
+    if (!(await findUserByUsername(db, username))) await createUser(db, { username, password: opts.password, roles, driverId });
+  };
+  await ensureUser('demo-admin', ['admin'], null);
+  await ensureUser('demo-planner', ['planner'], null);
+  await ensureUser('demo-driver1', ['driver'], d1);
+  await ensureUser('demo-driver2', ['driver'], d2);
+  const single = (await db.collection(C.serviceTypes).findOne({ code: 'SINGLE' }))!._id as ObjectId;
+  if ((await db.collection(C.deliveryOrders).countDocuments({ clientRef: /^DEMO-/ })) === 0) {
+    const plantId = plant;
+    const dests = [(await db.collection(C.locations).findOne({ code: 'DEMO-SITE-BKK' }))!._id as ObjectId, kkn, kkn];
+    for (const [i, dest] of dests.entries()) {
+      const now2 = new Date();
+      await db.collection(C.deliveryOrders).insertOne({
+        doNo: await nextNumber(db, 'DO'), clientRef: `DEMO-${i + 1}`, clientId, jobGroupId: group!._id, jobGroupMatch: { status: 'manual', candidates: [group!._id] },
+        serviceTypeId: single, materialId: readymix, intendedTruckTypeId: mixer, qty: 6, unit: 'm3', palletPlan: null,
+        originLocationId: plantId, destLocationId: dest, pickupWindow: null, dropWindow: null, distance: { clientKm: null },
+        shipmentId: null, pickupStopId: null, dropStopId: null, status: 'UNASSIGNED', note: null, cancelledAt: null, cancelReason: null,
+        attempts: [], createdBy: 'seed', createdAt: now2, updatedBy: 'seed', updatedAt: now2,
+      });
+    }
+  }
+
+  // One shipment already DISPATCHED to demo-driver1 (a 4th DO, `DEMO-4`), so the phone app shows
+  // a job the moment it's logged into — no planning steps needed for the first demo look. Built
+  // as plain documents (not via `createShipment`/`transition`, which need a Fastify app this
+  // script doesn't have); the shape mirrors what those services produce. Idempotent on `DEMO-4`.
+  if (!(await db.collection(C.deliveryOrders).findOne({ clientRef: 'DEMO-4' }))) {
+    const now2 = new Date();
+    const bkkSite = (await db.collection(C.locations).findOne({ code: 'DEMO-SITE-BKK' }))!._id as ObjectId;
+    const vehicle1 = (await db.collection(C.vehicles).findOne({ plateKey: plateKey('80-3001') }))!._id as ObjectId;
+    const doId = new ObjectId();
+    const pickupStopId = new ObjectId();
+    const dropStopId = new ObjectId();
+    await db.collection(C.deliveryOrders).insertOne({
+      _id: doId,
+      doNo: await nextNumber(db, 'DO'), clientRef: 'DEMO-4', clientId, jobGroupId: group!._id, jobGroupMatch: { status: 'manual', candidates: [group!._id] },
+      serviceTypeId: single, materialId: readymix, intendedTruckTypeId: mixer, qty: 6, unit: 'm3', palletPlan: null,
+      originLocationId: plant, destLocationId: bkkSite, pickupWindow: null, dropWindow: null, distance: { clientKm: null },
+      shipmentId: null, pickupStopId: null, dropStopId: null, status: 'UNASSIGNED', note: null, cancelledAt: null, cancelReason: null,
+      attempts: [], createdBy: 'seed', createdAt: now2, updatedBy: 'seed', updatedAt: now2,
+    });
+    const shipmentId = new ObjectId();
+    const plannedStart = bangkokTodayAt(8);
+    const plannedEnd = bangkokTodayAt(12);
+    const stops = [
+      { stopId: pickupStopId, seq: 1, locationId: plant, pickupDoIds: [doId], dropDoIds: [], plannedArrival: null, status: 'PENDING' as const },
+      { stopId: dropStopId, seq: 2, locationId: bkkSite, pickupDoIds: [], dropDoIds: [doId], plannedArrival: null, status: 'PENDING' as const },
+    ];
+    await db.collection(C.shipments).insertOne({
+      _id: shipmentId,
+      shipmentNo: await nextNumber(db, 'SH'),
+      status: 'DISPATCHED',
+      version: 3,
+      plannedStart, plannedEnd,
+      head: { vehicleId: vehicle1, driverId: d1 }, tail: null,
+      stops,
+      legs: [{ fromStopId: pickupStopId, toStopId: dropStopId, loaded: true, doIds: [doId], mapKm: null, gpsKm: null }],
+      warnings: [], note: 'Demo shipment — ready for demo-driver1',
+      dispatch: { at: now2, by: 'seed', version: 3 }, driverResponse: null,
+      cancelledAt: null, cancelReason: null,
+      closedAt: null, closedBy: null, summaryId: null,
+      createdBy: 'seed', createdAt: now2, updatedBy: 'seed', updatedAt: now2,
+    });
+    await db.collection(C.deliveryOrders).updateOne(
+      { _id: doId },
+      { $set: { status: 'PLANNED', shipmentId, pickupStopId, dropStopId, updatedAt: now2 } },
+    );
+  }
 }

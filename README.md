@@ -23,7 +23,7 @@ docker exec mongo mongosh --quiet --eval "rs.initiate()"
 npm install
 cp .env.example .env        # then edit secrets
 npm run seed                # indexes, truck types, pallet movement types, admin user
-npm run seed -- --demo      # optional demo client, locations, job group, POD template
+npm run seed -- --demo      # optional: demo client, fleet, drivers, users, DOs (see "Demo" below)
 npm run dev                 # http://localhost:3000
 ```
 
@@ -91,6 +91,123 @@ Flow: create delivery orders (`POST /delivery-orders` or `/delivery-orders/bulk`
 - `GET /status-codes` — the two-level catalogue: `level1` is `working` / `not_working`, `code` is the detail (ATMS codes such as `A`, `A50`, `ล`, `ป`; planning codes such as `PM`, `REPAIR`, `TIRE`, `LEAVE`). Codes named `ATMS … (รอยืนยันความหมาย)` need their meaning confirmed by the PO (admin can rename them).
 - `POST /resource-blocks` — mark a truck or driver unavailable for a period with a status code. Codes with `blocksAssignment: true` stop assignment; `OTHER` only warns.
 - `GET /holidays`, drivers' `weeklyDaysOff` — produce warnings, never block.
+
+## Driver execution and POD (Plan 3)
+
+Once a shipment is `DISPATCHED` and the driver has `ACCEPTED` it, the phone app drives the rest of
+the trip through the `driver` role's own endpoints:
+
+- **Photos and signatures:** `POST /uploads/presign` (`{ shipmentId, doId, contentType }`) returns a
+  short-lived (300 s) presigned `PUT` `url` plus the `key` to reference it by; the app `PUT`s the
+  file straight to that URL (to Spaces, or to `/uploads/local` in memory-storage dev/demo mode),
+  then submits the POD referencing that `key` and the file's own SHA-256.
+- **POD submission:** `POST /driver/pods` — one POD per delivery order per attempt, with GPS
+  evidence, template answers and file references. Submission is idempotent on `clientPodId`: a
+  replay of the same id returns the stored POD (`200`) instead of creating a second one (`201`
+  the first time). The server re-verifies every file (existence, size, hash) before accepting.
+- **Step events:** `POST /driver/events` — batches of up to 100 timeline events (arrival,
+  departure, etc.), each idempotent on its own `clientEventId`; a batch can mix already-seen and
+  new events safely. A `409 SHIPMENT_CHANGED` result means the shipment moved on (e.g. the
+  planner re-dispatched it) while this step was in flight — resend the same event (same
+  `clientEventId`) once the app has refreshed its copy of the shipment; the previously-accepted
+  events in the same batch are unaffected.
+- **POD review:** `GET /pods` / `GET /pods/:id` (any staff role) list and inspect submitted PODs
+  (with presigned file links); `POST /pods/:id/verify` and `POST /pods/:id/reject` (admin or
+  planner) decide them. A rejected POD can be resubmitted — the new POD's `supersedesPodId` links
+  back to the one it replaces.
+- **Pallets:** `POST /driver/pallet-movements` records pallet movements against the shipment's
+  **tail** vehicle (`tailVehicleId` — the vehicle that actually carries pallets; a rigid truck's
+  own vehicle stands in for it), keeping a running per-vehicle balance transactionally.
+  `GET /pallet-movements` lists movements; a driver calling it only ever sees their own (whatever
+  filter they send), staff can filter by `tailVehicleId`/`driverId`. `POST /pallet-movements`
+  (admin) records a manual correction.
+- **Close and evidence:** `POST /shipments/:id/close` (admin or planner) locks a completed
+  shipment into an immutable trip summary once every delivered/failed DO has a verified POD.
+  `GET /shipments/:id/summary` returns that summary as JSON (POD hashes, event count, flags,
+  per-leg/per-DO distances); `GET /shipments/:id/summary.pdf` streams the generated Thai evidence
+  PDF (`404 NOT_FOUND` if the shipment was never closed, `422 PDF_NOT_READY` if the PDF failed to
+  build); `POST /shipments/:id/summary.pdf/regenerate` (same roles as close) rebuilds it.
+- **File storage:** `STORAGE_DRIVER=s3` (required in production) uses DigitalOcean Spaces —
+  set `SPACES_ENDPOINT`, `SPACES_REGION`, `SPACES_BUCKET`, `SPACES_KEY`, `SPACES_SECRET`.
+  `STORAGE_DRIVER=memory` (dev/demo only) keeps files in process memory and serves them back
+  through `/uploads/local`, signed the same way as a real presigned URL.
+- **Driver accounts:** only an **active** user with the `driver` role holds a `driverId`;
+  removing the role, or deactivating the user, releases the link so the driver can be relinked to
+  a different account (`PATCH /users/:id`).
+
+### Verifying a POD hash
+
+`pod.hash` is the SHA-256 (hex) of the canonical JSON of:
+
+    { doId, templateId, templateVersion, outcome, reasonCode, note, answers, files, evidence }
+
+- `doId`, `templateId`: 24-character hex strings; `templateId` is `null` when the built-in default form was used.
+- `files`: each file as `{ key, sha256, fieldKey }`, ordered by the file `key` (ascending).
+- `evidence`: the POD's `evidence` object as returned by `GET /pods/:id`, exactly `{ deviceTime, receivedAt, lat, lng, accuracyM, noGpsReason, geofenceDistanceM, device, appVersion, offline }`, with `deviceTime` and `receivedAt` as ISO-8601 UTC strings.
+- Canonical JSON: `JSON.stringify` of each value with object keys sorted ascending at every level (all keys are ASCII), no whitespace, `undefined` members omitted, arrays in their given order.
+
+`outcome`, `reasonCode` and `note` **are** part of the hash (spec §6.3, as amended by ruling
+P3-R16): the hash covers what was declared, not only the answers, so none of it can be changed
+after submission without breaking the hash. They are also stored on the append-only POD record
+for review, alongside `status`/`review` (which are *not* part of the hash, since they're set by
+the review step that comes after submission).
+
+## Demo
+
+A ready-to-run demo scenario for a first look from a phone (driver app) and a computer (admin
+panel), side by side.
+
+**Prerequisites** — Docker Desktop running, then:
+
+```bash
+docker run -d --name mena-mongo -p 27017:27017 mongo:7 --replSet rs0
+docker exec mena-mongo mongosh --quiet --eval "rs.initiate()"
+```
+
+**`.env`** (see `.env.example`):
+
+```bash
+MONGO_URI=mongodb://localhost:27017/mena_demo?replicaSet=rs0&directConnection=true
+MONGO_DB=mena_demo
+JWT_SECRET=change-me-to-a-long-random-string-at-least-32-chars
+API_KEY_PEPPER=change-me-at-least-16-chars
+DEMO_PASSWORD=pick-a-password-at-least-8-chars
+STORAGE_DRIVER=memory
+PUBLIC_BASE_URL=https://<computer-ip>:5174
+```
+
+`PUBLIC_BASE_URL` is the computer's LAN address the phone can reach (the driver app's own dev
+server) — set `<computer-ip>` to that computer's LAN IP, e.g. `https://192.168.1.102:5174`.
+`MONGO_DB=mena_demo` matters beyond naming: `--demo` refuses to run against a database whose name
+doesn't look like a dev/demo/test database (guarding against accidentally pointing this at a real
+one) unless `--force` is passed.
+
+**Seed and run:**
+
+```bash
+npm run seed -- --demo      # requires DEMO_PASSWORD; refuses to run when NODE_ENV=production
+npm run dev                  # http://localhost:3000
+```
+
+Running it twice is safe — it only ever adds what's missing.
+
+**What it creates:** client `DEMO`; locations `DEMO-PLANT` (a batching plant), `DEMO-SITE-BKK` (a
+construction site in Bangkok) and `DEMO-SHOP-KKN` (a shop in Khon Kaen), each with real
+coordinates and a `geofenceRadiusM`; a published POD template for the demo job group; six
+vehicles (`70-1001`/`70-1002` trailer heads, `71-2001`/`71-2002` tails, `80-3001`/`80-3002` rigid
+mixers); two drivers (`DRV-001`, `DRV-002`); three `UNASSIGNED` delivery orders ready to be put on
+a shipment; and **one shipment already `DISPATCHED` to demo-driver1** (`plannedStart` = today,
+08:00 Bangkok time) so the phone shows a job the moment it logs in — no planning steps needed for
+the first look.
+
+**Logins** (password is whatever you set `DEMO_PASSWORD` to):
+
+| Username | Role | Notes |
+|---|---|---|
+| `demo-admin` | admin | full access, including POD review and close |
+| `demo-planner` | planner | planning, POD review and close (same as admin for those) |
+| `demo-driver1` | driver | linked to `DRV-001`; already has a dispatched shipment waiting |
+| `demo-driver2` | driver | linked to `DRV-002`; no shipment yet — pick one of the 3 unassigned DOs, plan and dispatch it from the admin panel |
 
 ## Performance
 
