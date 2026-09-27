@@ -9,3 +9,4 @@ apps/*/dist
 .DS_Store
 coverage/
 .demo-data/
+apps/*/.vite/
