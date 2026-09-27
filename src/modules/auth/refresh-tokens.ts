@@ -25,7 +25,8 @@ export async function issueRefreshToken(
   const _id = new ObjectId();
   const secret = randomBytes(32).toString('base64url');
   const now = new Date();
-  await db.collection<RefreshTokenDoc>(C.refreshTokens).insertOne({
+  const coll = db.collection<RefreshTokenDoc>(C.refreshTokens);
+  await coll.insertOne({
     _id,
     userId,
     familyId,
@@ -35,6 +36,14 @@ export async function issueRefreshToken(
     replacedAt: null,
     revokedAt: null,
   });
+  // A concurrent reuse-detection revoke of this family can complete just before this
+  // row existed to be swept up by it (revokeFamily only matches rows present at the
+  // time it runs). Close that window: if the family already carries a revocation,
+  // this brand-new token must not survive it either.
+  const familyAlreadyRevoked = await coll.findOne({ familyId, _id: { $ne: _id }, revokedAt: { $ne: null } });
+  if (familyAlreadyRevoked) {
+    await coll.updateOne({ _id }, { $set: { revokedAt: now } });
+  }
   return `${_id.toHexString()}.${secret}`;
 }
 
@@ -69,13 +78,23 @@ async function revokeFamily(db: Db, familyId: ObjectId): Promise<void> {
 // - revoked                          -> revoke the family, reject as reused
 // - replaced within the grace window -> a quick retry; return the same result
 // - replaced outside the grace window -> revoke the family, reject as reused
+//
+// graceSec === 0 means zero tolerance: this must NEVER depend on millisecond-level
+// timing (two callers can legitimately observe the same `replacedAt` timestamp when
+// they lose a race within the same tick), so a lost race is unconditionally reuse
+// when there is no grace window at all.
 async function resolveReplayState(
   db: Db,
   doc: RefreshTokenDoc,
   now: Date,
   graceSec: number,
 ): Promise<{ userId: ObjectId; familyId: ObjectId }> {
-  if (!doc.revokedAt && doc.replacedAt && now.getTime() - doc.replacedAt.getTime() <= graceSec * 1000) {
+  if (
+    graceSec > 0 &&
+    !doc.revokedAt &&
+    doc.replacedAt &&
+    now.getTime() - doc.replacedAt.getTime() <= graceSec * 1000
+  ) {
     return { userId: doc.userId, familyId: doc.familyId };
   }
   await revokeFamily(db, doc.familyId);
