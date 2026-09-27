@@ -40,6 +40,15 @@ resourceBlocks {
 | `GET /availability` | Excludes blocked resources and returns the reason and end time ("PM until 29 Sep") |
 | Current status of a truck/driver | **Derived**, not stored: available / on shipment / PM / repair / leave … |
 
+### 1.3a Two-level status (decided 2026-09-27)
+
+Every truck/driver status has two levels, matching the existing ATMS daily data (`atms.vehicle_daily_asia`, field `คนขับ`, one row per truck per day):
+
+- **Level 1:** `working` or `not_working`.
+- **Level 2:** the detailed code, e.g. `A` (ทำงานปกติ), `A50` (ทำงาน 4 ชม.), `ล`, `ป`, `ก`, `ฝ`, or planning codes `PM`, `REPAIR`, `TIRE`, `LEAVE`, …
+
+Codes live in a `statusCodes` catalogue `{ code, name, level1, appliesTo: vehicle|driver|both, blocksAssignment }`. ATMS codes starting with `A` are `working`; the others are `not_working`. Meanings of ATMS codes not yet confirmed are seeded with the name `ATMS <code> (รอยืนยันความหมาย)` for the PO to fill in. Resource blocks reference a catalogue code, so each block carries both levels. Importing ATMS daily statuses into this system is part of Plan 4 (integrations). Availability (blocks, calendar, status catalogue) is built in **Plan 2**, not Phase 2.
+
 ### 1.4 Sources (decided)
 
 - Truck blocks: **entered manually** in Phase 2. A scheduled **ATMS repair-status sync** (statuses other than วA/วร/ว → REPAIR block) is a later add-on.
