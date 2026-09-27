@@ -8,7 +8,7 @@ import type { Issue } from '../../lib/issues.js';
 import { toApi } from '../../lib/serialize.js';
 import { withTransaction } from '../../lib/tx.js';
 import type { JobGroupLite, LocationLite } from '../master/job-groups.js';
-import type { DeliveryOrderDoc } from '../orders/order.types.js';
+import type { DeliveryOrderDoc, DoStatus } from '../orders/order.types.js';
 import { jobGroupWarnings, rematchJobGroup, rematchJobGroupBatch } from '../orders/orders.service.js';
 import { findShipmentsUsing } from './shipment.queries.js';
 import type { ShipmentInputT } from './shipment.schemas.js';
@@ -121,13 +121,13 @@ export async function reserveResources(db: Db, shipment: ShipmentDoc, session: C
   for (const id of driverIds) await conflictOn('driver', id);
 }
 
-export async function releaseDos(db: Db, shipmentId: ObjectId, session: ClientSession): Promise<void> {
+export async function releaseDos(db: Db, shipmentId: ObjectId, session: ClientSession, opts: { status?: DoStatus } = {}): Promise<void> {
   const coll = db.collection<DeliveryOrderDoc>(C.deliveryOrders);
-  const dos = await coll.find({ shipmentId }, { session }).toArray();
+  const dos = await coll.find({ shipmentId, ...(opts.status ? { status: opts.status } : {}) }, { session }).toArray();
   const now = new Date();
   for (const d of dos) {
-    // Same rule as `linkDos`: once the shipment releases the DO (e.g. cancel), its truck type
-    // can only come from `intendedTruckTypeId`, never the (now moot) shipment vehicle.
+    // Same rule as `linkDos`: once the shipment releases the DO (cancel, or a failed attempt at close),
+    // its truck type can only come from `intendedTruckTypeId`, never the (now moot) shipment vehicle.
     const rematched = await rematchJobGroup(db, d, d.intendedTruckTypeId ?? null);
     await coll.updateOne(
       { _id: d._id, shipmentId },
@@ -323,7 +323,17 @@ export async function updateShipment(
 export async function transition(
   app: FastifyInstance,
   existing: ShipmentDoc,
-  opts: { version: number; from: ShipmentStatus[]; set: Partial<ShipmentDoc>; action: string; by: string; notAllowedCode: string; releaseDos?: boolean },
+  opts: {
+    version: number;
+    from: ShipmentStatus[];
+    set: Partial<ShipmentDoc>;
+    action: string;
+    by: string;
+    notAllowedCode: string;
+    releaseDos?: boolean;
+    /** Extra writes that must commit with the transition (e.g. the trip summary on close). */
+    inTx?: (session: ClientSession, updated: ShipmentDoc) => Promise<void>;
+  },
 ): Promise<ShipmentDoc> {
   if (!opts.from.includes(existing.status)) {
     throw unprocessable(opts.notAllowedCode, `Cannot ${opts.action} a ${existing.status} shipment`);
@@ -338,6 +348,7 @@ export async function transition(
     );
     if (!updated) throw versionConflict();
     if (opts.releaseDos) await releaseDos(app.db, existing._id, session);
+    if (opts.inTx) await opts.inTx(session, updated);
     // `after` includes every field the caller actually set (e.g. `driverResponse` with a decline
     // reason, or `dispatch`), not just `status`, so the audit trail shows what changed.
     const changed = Object.fromEntries(Object.keys(opts.set).map((k) => [k, (updated as unknown as Record<string, unknown>)[k]]));

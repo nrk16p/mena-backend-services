@@ -24,4 +24,5 @@ export const C = {
   shipments: 'shipments',
   events: 'events',
   pods: 'pods',
+  tripSummaries: 'tripSummaries',
 } as const;

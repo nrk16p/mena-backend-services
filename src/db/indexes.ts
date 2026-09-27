@@ -68,6 +68,7 @@ export const INDEXES: Record<string, IndexDescription[]> = {
     { key: { doId: 1, _id: -1 } },
     { key: { shipmentId: 1, _id: 1 } },
   ],
+  [C.tripSummaries]: [{ key: { shipmentId: 1 }, unique: true }],
 };
 
 export async function ensureIndexes(db: Db): Promise<void> {

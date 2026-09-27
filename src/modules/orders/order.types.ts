@@ -34,6 +34,8 @@ export interface DeliveryOrderDoc {
   status: DoStatus;
   /** Failed delivery attempts (spec §3.3), pushed by a FAILED POD. */
   attempts?: { shipmentId: ObjectId; reasonCode: string; podId: ObjectId; at: Date }[];
+  /** Set by the Plan 4 migration; legacy DOs are exempt from the job-group requirement at close (spec §3.4). */
+  legacy?: boolean;
   note: string | null;
   cancelledAt: Date | null;
   cancelReason: string | null;
