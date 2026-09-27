@@ -9,9 +9,20 @@ import mongoPlugin from './plugins/mongo.js';
 import openapiPlugin from './plugins/openapi.js';
 import { apiRoutes } from './routes.js';
 
+// Fastify's own `trustProxy: number` support fails closed (trusts nothing) as of the
+// installed version, so a hop count is compiled here into an explicit trust function
+// instead — the classic "trust exactly the first N proxies" rule.
+function trustProxyOption(v: string): boolean | ((address: string, hop: number) => boolean) {
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  const hops = Number(v);
+  return (_address, hop) => hop < hops;
+}
+
 export async function buildApp(config: Config) {
   const app = Fastify({
     logger: config.NODE_ENV === 'test' ? false : { level: config.LOG_LEVEL },
+    trustProxy: trustProxyOption(config.TRUST_PROXY),
   }).withTypeProvider<ZodTypeProvider>();
 
   app.setValidatorCompiler(validatorCompiler);

@@ -11,7 +11,7 @@ import { revokeAllForUser, revokeRefreshToken, rotateRefreshToken } from './refr
 
 const LoginBody = z.object({
   username: z.string().trim().min(1),
-  password: z.string().min(1),
+  password: z.string().min(1).max(128),
   lat: z.number().min(-90).max(90).optional(),
   lng: z.number().min(-180).max(180).optional(),
 });
@@ -21,7 +21,22 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     '/auth/login',
     {
       schema: { tags: ['auth'], body: LoginBody, response: { 200: TokenResponseSchema } },
-      config: { rateLimit: { max: app.config.LOGIN_RATE_LIMIT_PER_MIN, timeWindow: '1 minute' } },
+      config: {
+        rateLimit: {
+          max: app.config.LOGIN_RATE_LIMIT_PER_MIN,
+          timeWindow: '1 minute',
+          // Run after body parsing/validation so the (already-validated) username is
+          // available here, and key per IP+username instead of per IP alone — otherwise
+          // every login behind a shared proxy IP (e.g. Render) draws from one bucket,
+          // and one user's failed attempts lock out everyone else on that IP.
+          hook: 'preHandler',
+          keyGenerator: (req) => {
+            const body = req.body as { username?: unknown } | undefined;
+            const username = typeof body?.username === 'string' ? body.username.trim().toLowerCase() : undefined;
+            return username ? `${req.ip}|${username}` : req.ip;
+          },
+        },
+      },
     },
     async (req) => {
       const user = await findUserByUsername(app.db, req.body.username);

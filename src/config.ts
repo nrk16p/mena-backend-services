@@ -13,6 +13,15 @@ const EnvSchema = z.object({
   REFRESH_REUSE_GRACE_SEC: z.coerce.number().int().min(0).default(30),
   API_KEY_PEPPER: z.string().min(16),
   LOGIN_RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(10),
+  // Passed straight to Fastify's `trustProxy` option. 'false' (default) trusts nothing;
+  // 'true' trusts the immediate peer's X-Forwarded-For chain unconditionally; a positive
+  // integer is the number of proxy hops to trust (set this on Render, see README).
+  TRUST_PROXY: z
+    .string()
+    .default('false')
+    .refine((v) => v === 'true' || v === 'false' || /^[1-9]\d*$/.test(v), {
+      message: 'TRUST_PROXY must be "true", "false", or a positive integer hop count',
+    }),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

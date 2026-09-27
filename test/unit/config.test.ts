@@ -30,4 +30,15 @@ describe('loadConfig', () => {
   it('coerces numeric env values', () => {
     expect(loadConfig({ ...base, PORT: '8080' }).PORT).toBe(8080);
   });
+
+  it('TRUST_PROXY defaults to "false" and accepts "true" or a positive hop-count string', () => {
+    expect(loadConfig(base).TRUST_PROXY).toBe('false');
+    expect(loadConfig({ ...base, TRUST_PROXY: 'true' }).TRUST_PROXY).toBe('true');
+    expect(loadConfig({ ...base, TRUST_PROXY: '2' }).TRUST_PROXY).toBe('2');
+  });
+
+  it('rejects an invalid TRUST_PROXY value', () => {
+    expect(() => loadConfig({ ...base, TRUST_PROXY: 'yes' })).toThrow(/TRUST_PROXY/);
+    expect(() => loadConfig({ ...base, TRUST_PROXY: '0' })).toThrow(/TRUST_PROXY/);
+  });
 });

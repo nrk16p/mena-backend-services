@@ -64,6 +64,15 @@ describe('login and /me', () => {
     const res = await app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username: 'gone', password: TEST_PASSWORD } });
     expect(res.statusCode).toBe(401);
   });
+
+  it('rejects an overlong password with 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'planner1', password: 'a'.repeat(129) },
+    });
+    expect(res.statusCode).toBe(400);
+  });
 });
 
 describe('login rate limit', () => {
@@ -80,5 +89,18 @@ describe('login rate limit', () => {
     const third = await attempt();
     expect(third.statusCode).toBe(429);
     expect(third.json().code).toBe('RATE_LIMITED');
+  });
+
+  it('keys the limit by ip+username, not ip alone: distinct (case-insensitive) usernames get separate budgets', async () => {
+    const attempt = (username: string) => app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username, password: 'y' } });
+    expect((await attempt('alice')).statusCode).not.toBe(429);
+    expect((await attempt('alice')).statusCode).not.toBe(429);
+    expect((await attempt('bob')).statusCode).not.toBe(429);
+    expect((await attempt('bob')).statusCode).not.toBe(429);
+    const aliceThird = await attempt('  Alice  ');
+    expect(aliceThird.statusCode).toBe(429);
+    expect(aliceThird.json().code).toBe('RATE_LIMITED');
+    const bobThird = await attempt('BOB');
+    expect(bobThird.statusCode).toBe(429);
   });
 });
