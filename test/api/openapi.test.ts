@@ -14,6 +14,6 @@ describe('OpenAPI', () => {
     expect(res.statusCode).toBe(200);
     const doc = res.json();
     expect(doc.openapi).toMatch(/^3\./);
-    expect(doc.info.title).toBe('mena-backend-services');
+    expect(doc.info.title).toBe('Mena TMS API');
   });
 });

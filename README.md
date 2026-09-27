@@ -31,6 +31,24 @@ npm run dev                 # http://localhost:3000
 - API docs (Swagger UI): `http://localhost:3000/docs`
 - OpenAPI JSON: `http://localhost:3000/api/v1/openapi.json`
 
+## API docs
+
+- **`/reference`** (recommended) — [Scalar](https://scalar.com) API reference: searchable, grouped
+  into sections (Getting started, Master data, Planning, Driver app, Proof of delivery, Pallets,
+  System), with the intro/auth/error/pagination guide and the planner and driver-app walkthroughs
+  built into the document's description.
+- **`/docs`** — Swagger UI, same underlying OpenAPI document, "try it out" style.
+- **`/api/v1/openapi.json`** — the raw OpenAPI 3 document.
+- **`npm run openapi`** — regenerates `docs/api/openapi.json` (a committed, pretty-printed,
+  key-sorted snapshot of the same document) from the route schemas, without starting the server.
+  Run it and commit the result whenever a route's schema, tags, or this file's metadata changes;
+  `test/api/openapi-drift.test.ts` fails the test suite if the committed file is stale.
+- **Generating frontend TypeScript types** from the committed document:
+  ```bash
+  npx openapi-typescript docs/api/openapi.json -o apps/shared/api-types.ts
+  ```
+  (not generated automatically yet — run it yourself when the frontend needs the latest types).
+
 ## Scripts
 
 | Script | What it does |
