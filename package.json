@@ -16,10 +16,10 @@
     "seed": "tsx --env-file=.env scripts/seed.ts"
   },
   "dependencies": {
-    "@fastify/jwt": "^9.1.0",
+    "@fastify/jwt": "^10.2.2",
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/swagger": "^9.9.0",
-    "@fastify/swagger-ui": "^5.2.6",
+    "@fastify/swagger-ui": "^6.1.1",
     "argon2": "^0.41.1",
     "fastify": "^5.12.5",
     "fastify-plugin": "^5.1.0",
