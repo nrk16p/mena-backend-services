@@ -121,4 +121,6 @@ export async function openAuthedFile(path: string): Promise<void> {
   if (!res.ok) throw await readError(res);
   const url = URL.createObjectURL(await res.blob());
   window.open(url, '_blank');
+  // The new tab has loaded the blob by then; free the memory.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }

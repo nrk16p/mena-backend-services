@@ -20,16 +20,16 @@ export type ShipmentAction = 'plan' | 'dispatch' | 'cancel' | 'close' | 'pdf';
 
 /**
  * Which action button(s) the detail page's header should offer for a shipment's current status
- * and the caller's roles. Close (and, by extension, the PDF the close produces) is allowed for
- * both admin and planner — a PO decision, not a slip. Pure, so it's unit-testable without
- * mounting the page.
+ * and the caller's roles. Plan, dispatch, cancel, and close require admin or planner roles.
+ * PDF is available to all staff roles. Pure, so it's unit-testable without mounting the page.
  */
 export function availableActions(status: ShipmentStatus, roles: string[]): ShipmentAction[] {
+  const hasEditRole = roles.includes('admin') || roles.includes('planner');
   const actions: ShipmentAction[] = [];
-  if (status === 'DRAFT') actions.push('plan');
-  if (status === 'PLANNED') actions.push('dispatch');
-  if (['DRAFT', 'PLANNED', 'DISPATCHED', 'ACCEPTED'].includes(status)) actions.push('cancel');
-  if (status === 'COMPLETED' && (roles.includes('admin') || roles.includes('planner'))) actions.push('close');
+  if (status === 'DRAFT' && hasEditRole) actions.push('plan');
+  if (status === 'PLANNED' && hasEditRole) actions.push('dispatch');
+  if (['DRAFT', 'PLANNED', 'DISPATCHED', 'ACCEPTED'].includes(status) && hasEditRole) actions.push('cancel');
+  if (status === 'COMPLETED' && hasEditRole) actions.push('close');
   if (status === 'CLOSED') actions.push('pdf');
   return actions;
 }
