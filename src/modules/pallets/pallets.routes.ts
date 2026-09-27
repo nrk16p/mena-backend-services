@@ -36,8 +36,11 @@ const MovementItem = z.object({
   id: z.string(), clientEventId: z.string().nullable(), tailVehicleId: z.string(), driverId: z.string().nullable(), shipmentId: z.string().nullable(),
   doId: z.string().nullable(), stopId: z.string().nullable(), locationId: z.string().nullable(), typeCode: z.string(), sign: z.number(), qty: z.number(),
   remark: z.string().nullable(), deviceTime: z.string(), receivedAt: z.string(), lat: z.number().nullable(), lng: z.number().nullable(),
-  accuracyM: z.number().nullable(), noGpsReason: z.string().nullable(), geofenceDistanceM: z.number().nullable(), flags: z.array(z.string()),
-  balanceAfter: z.number(), source: z.enum(['app', 'admin']), by: z.string(),
+  accuracyM: z.number().nullable(), noGpsReason: z.string().nullable(), geofenceDistanceM: z.number().nullable(),
+  flags: z.array(z.string()).describe('GPS/timing quality flags (NO_GPS, LOW_ACCURACY, OUTSIDE_GEOFENCE, LATE_SYNC) — informational, never block the movement.'),
+  balanceAfter: z.number().describe('The tail vehicle\'s running pallet balance immediately after this movement was applied.'),
+  source: z.enum(['app', 'admin']).describe('"app": recorded by a driver via the phone. "admin": a manual correction via POST /pallet-movements.'),
+  by: z.string(),
 });
 
 /** One movement moves at most this many pallets; a typo like 10000 is rejected at the door. */
@@ -79,11 +82,11 @@ async function applyMovement(
 
 const DriverMovement = z
   .object({
-    clientEventId: z.string().uuid(),
+    clientEventId: z.string().uuid().describe('UUID generated on the phone for this movement; replaying the same id returns the original result as a duplicate instead of applying it twice.'),
     shipmentId: objectIdString,
-    stopId: objectIdString.nullable().default(null),
-    doId: objectIdString.nullable().default(null),
-    typeCode: z.string().trim().min(1).max(40),
+    stopId: objectIdString.nullable().default(null).describe('The stop this movement happened at, if any; must be a stop on the shipment.'),
+    doId: objectIdString.nullable().default(null).describe('The delivery order this movement relates to, if any; must be on the shipment.'),
+    typeCode: z.string().trim().min(1).max(40).describe('References an active pallet movement type, which determines whether the movement adds or subtracts from the balance.'),
     qty: PalletQty,
     remark: z.string().trim().max(200).nullable().default(null),
   })
@@ -98,6 +101,12 @@ export const palletRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['driver'],
+        summary: 'Record pallet exchanges with a customer',
+        description:
+          'Driver-only. Records up to 50 pallet movements in one batch, each adjusting the tail vehicle\'s running pallet balance by the movement ' +
+          'type\'s signed amount. `clientEventId` is a UUID generated on the phone: replaying it returns `status: "duplicate"` with the balance at ' +
+          'that time instead of applying it twice. Per-item `status` is `"accepted"`, `"duplicate"`, or `"rejected"` (with `code`/`message`, e.g. ' +
+          '`SHIPMENT_NOT_ACTIVE`, `INVALID_REFERENCE`) — the batch call itself always returns 200.',
         body: z.object({ movements: z.array(DriverMovement).min(1).max(50) }),
         response: { 200: z.object({ results: z.array(z.object({ clientEventId: z.string(), status: z.enum(['accepted', 'duplicate', 'rejected']), balanceAfter: z.number().nullable(), code: z.string().optional(), message: z.string().optional() })) }) },
       },
@@ -152,7 +161,16 @@ export const palletRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['pallets'],
-        body: z.object({ tailVehicleId: objectIdString, typeCode: z.string().trim().min(1).max(40), qty: PalletQty, remark: z.string().trim().min(3).max(200) }),
+        summary: 'Manually correct a vehicle\'s pallet balance',
+        description:
+          'Admin-only. Records a manual pallet movement not tied to a driver, shipment, stop or delivery order — for corrections and adjustments. ' +
+          '404 `Vehicle` if `tailVehicleId` does not exist, 422 `INVALID_REFERENCE` if `typeCode` is not an active pallet movement type.',
+        body: z.object({
+          tailVehicleId: objectIdString,
+          typeCode: z.string().trim().min(1).max(40).describe('References an active pallet movement type, which determines whether the movement adds or subtracts from the balance.'),
+          qty: PalletQty,
+          remark: z.string().trim().min(3).max(200).describe('Why this manual correction was made.'),
+        }),
         response: { 201: MovementItem },
       },
       preHandler: app.requireRoles('admin'),
@@ -179,6 +197,8 @@ export const palletRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['pallets'],
+        summary: 'List current pallet balances by vehicle',
+        description: 'Callable by admin, planner or viewer. Balance is the running total of every movement recorded for the vehicle\'s tail (positive = pallets held).',
         querystring: z.object({ tailVehicleId: objectIdString.optional() }),
         response: { 200: z.object({ items: z.array(z.object({ tailVehicleId: z.string(), plate: z.string(), balance: z.number(), lastMovementAt: z.string().nullable() })) }) },
       },
@@ -205,6 +225,10 @@ export const palletRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['pallets'],
+        summary: 'List pallet movements',
+        description:
+          'Cursor-paginated. Callable by admin, planner, viewer, or driver. A driver only ever sees their own movements — the `driverId` filter is ' +
+          'overridden to the caller\'s own id regardless of what is sent.',
         querystring: PageQuery.extend({ tailVehicleId: objectIdString.optional(), driverId: objectIdString.optional() }),
         response: { 200: pageResponse(MovementItem) },
       },

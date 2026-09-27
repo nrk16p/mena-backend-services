@@ -29,7 +29,22 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
     return d;
   };
 
-  app.post('/delivery-orders', { schema: { tags: ['delivery-orders'], body: DoFields, response: { 201: DoWithWarnings } }, preHandler: write }, async (req, reply) => {
+  app.post(
+    '/delivery-orders',
+    {
+      schema: {
+        tags: ['delivery-orders'],
+        summary: 'Create a delivery order (ใบสั่งส่ง)',
+        description:
+          'Creates a delivery order (DO) with status `UNASSIGNED`. Callable by admin or planner. Assigns the next DO number and attempts an ' +
+          'automatic job-group match; a no-match or ambiguous match is returned as a `JOB_GROUP_NONE`/`JOB_GROUP_AMBIGUOUS` warning rather than ' +
+          'failing the request. 422 `SAME_ORIGIN_DEST` when origin and destination are the same location.',
+        body: DoFields,
+        response: { 201: DoWithWarnings },
+      },
+      preHandler: write,
+    },
+    async (req, reply) => {
     const { set, warnings } = await prepareDoFields(app.db, req.body, null);
     const by = actorOf(req);
     const now = new Date();
@@ -61,13 +76,17 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['delivery-orders'],
+        summary: 'List delivery orders',
+        description:
+          'Lists delivery orders, newest-id-first with cursor pagination. Callable by admin, planner or viewer. Filter by `status`, `clientId`, ' +
+          '`jobGroupId`, `shipmentId`, or a `pickupWindow.from` range (`from`/`to`, inclusive/exclusive respectively).',
         querystring: PageQuery.extend({
-          status: z.enum(DO_STATUSES).optional(),
+          status: z.enum(DO_STATUSES).optional().describe('Filter by delivery-order status.'),
           clientId: objectIdString.optional(),
           jobGroupId: objectIdString.optional(),
           shipmentId: objectIdString.optional(),
-          from: z.string().datetime({ offset: true }).optional(),
-          to: z.string().datetime({ offset: true }).optional(),
+          from: z.string().datetime({ offset: true }).optional().describe('Only DOs whose pickup window starts at or after this ISO instant.'),
+          to: z.string().datetime({ offset: true }).optional().describe('Only DOs whose pickup window starts before this ISO instant.'),
         }),
         response: { 200: pageResponse(DoItem) },
       },
@@ -112,7 +131,12 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['delivery-orders'],
-        querystring: z.object({ dryRun: z.enum(['true', 'false']).default('true') }),
+        summary: 'Validate or create up to 500 delivery orders at once',
+        description:
+          'Callable by admin or planner. With `dryRun=true` (default), validates every item and reports per-item errors/warnings without saving ' +
+          'anything. With `dryRun=false`, saves all items in one transaction only if every item is valid; if any item fails, nothing is saved and ' +
+          'the request fails with 422 `BULK_HAS_ERRORS` (the same per-item report is in the error `details`).',
+        querystring: z.object({ dryRun: z.enum(['true', 'false']).default('true').describe('"false" actually creates the delivery orders; "true" (default) only validates.') }),
         body: z.object({ items: z.array(DoFields).min(1).max(500) }),
         response: { 200: BulkReport },
       },
@@ -185,13 +209,37 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
     },
   );
 
-  app.get('/delivery-orders/:id', { schema: { tags: ['delivery-orders'], params: IdParams, response: { 200: DoItem } }, preHandler: read }, async (req) =>
-    toApi(await load(req.params.id)),
+  app.get(
+    '/delivery-orders/:id',
+    {
+      schema: {
+        tags: ['delivery-orders'],
+        summary: 'Get a delivery order by id',
+        description: 'Callable by admin, planner or viewer. 404 if the id does not exist.',
+        params: IdParams,
+        response: { 200: DoItem },
+      },
+      preHandler: read,
+    },
+    async (req) => toApi(await load(req.params.id)),
   );
 
   app.patch(
     '/delivery-orders/:id',
-    { schema: { tags: ['delivery-orders'], params: IdParams, body: PatchDoBody, response: { 200: DoWithWarnings } }, preHandler: write },
+    {
+      schema: {
+        tags: ['delivery-orders'],
+        summary: 'Edit a delivery order',
+        description:
+          'Callable by admin or planner. Only a DO in `UNASSIGNED` or `PLANNED` may be edited (422 `DO_NOT_EDITABLE` otherwise). Once the DO is on ' +
+          'a shipment, its `clientId`/`originLocationId`/`destLocationId` are locked (422 `DO_LOCKED_BY_SHIPMENT`; remove it from the shipment first). ' +
+          'Re-runs job-group matching unless `jobGroupId` was set manually. 409 `DO_CHANGED` if the DO was modified since it was last read.',
+        params: IdParams,
+        body: PatchDoBody,
+        response: { 200: DoWithWarnings },
+      },
+      preHandler: write,
+    },
     async (req) => {
       const existing = await load(req.params.id);
       if (existing.status !== 'UNASSIGNED' && existing.status !== 'PLANNED') {
@@ -214,10 +262,13 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['delivery-orders'],
+        summary: 'Manually assign a job group to a delivery order',
         description:
           'Manually assigns a job group to a delivery order, at any status except CANCELLED. Unlike PATCH ' +
           '(which only accepts a DO in UNASSIGNED or PLANNED), this is the only way to give a job group to a ' +
-          'DO that already moved past PLANNED — the usual way a DO ends up blocking close with JOB_GROUP_REQUIRED.',
+          'DO that already moved past PLANNED — the usual way a DO ends up blocking close with JOB_GROUP_REQUIRED. ' +
+          'Callable by admin or planner. 422 `INVALID_REFERENCE` if the job group is not active or belongs to another client, ' +
+          '422 `DO_LOCKED_BY_SHIPMENT` if the DO is on a CLOSED shipment, 409 `DO_CHANGED` on a stale read.',
         params: IdParams,
         body: z.object({ jobGroupId: objectIdString }),
         response: { 200: DoItem },
@@ -271,7 +322,16 @@ export const orderRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/delivery-orders/:id/cancel',
     {
-      schema: { tags: ['delivery-orders'], params: IdParams, body: z.object({ reason: z.string().trim().min(3).max(500) }), response: { 200: DoItem } },
+      schema: {
+        tags: ['delivery-orders'],
+        summary: 'Cancel a delivery order',
+        description:
+          'Callable by admin or planner. Only an `UNASSIGNED` DO with no shipment may be cancelled: 422 `DO_IN_SHIPMENT` if it is on a shipment ' +
+          '(remove it first), 422 `DO_NOT_CANCELLABLE` if its status is anything else, or if it changed since it was last read.',
+        params: IdParams,
+        body: z.object({ reason: z.string().trim().min(3).max(500).describe('Why this delivery order is being cancelled.') }),
+        response: { 200: DoItem },
+      },
       preHandler: write,
     },
     async (req) => {

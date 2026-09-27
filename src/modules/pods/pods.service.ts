@@ -22,19 +22,30 @@ import { type PodFileRef, validatePodAnswers } from './pod-validation.js';
 
 export const PodInput = z
   .object({
-    clientPodId: z.string().uuid(),
-    doId: objectIdString,
-    outcome: z.enum(['DELIVERED', 'FAILED']),
-    reasonCode: z.enum(REASON_CODES).nullable().default(null),
+    clientPodId: z.string().uuid().describe('UUID generated on the phone for this POD; replaying the same id returns the original stored POD (200) instead of creating a duplicate (201).'),
+    doId: objectIdString.describe('The delivery order this POD is for; must be on a drop stop of the caller\'s own shipment.'),
+    outcome: z.enum(['DELIVERED', 'FAILED']).describe('DELIVERED requires UNLOAD_END already recorded at the drop stop; FAILED requires ARRIVED and a reasonCode.'),
+    reasonCode: z.enum(REASON_CODES).nullable().default(null).describe('Required when outcome is FAILED (422 REASON_REQUIRED otherwise); "OTHER" additionally requires a `note` (422 NOTE_REQUIRED).'),
     note: z.string().trim().max(500).nullable().default(null),
-    answers: z.record(z.unknown()).default({}),
+    answers: z.record(z.unknown()).default({}).describe('Answers to the delivery order\'s POD form fields (see GET /driver/shipments podForm); validated against that form\'s required fields and types (422 POD_INVALID).'),
     files: z
-      .array(z.object({ fieldKey: z.string(), key: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/), mime: z.string(), bytes: z.number().int().min(0) }))
+      .array(
+        z.object({
+          fieldKey: z.string().describe('The POD form field (e.g. a photo or signature field) this file answers.'),
+          key: z.string().describe('The storage key returned by POST /uploads/presign, after the file was PUT there.'),
+          sha256: z
+            .string()
+            .regex(/^[0-9a-f]{64}$/)
+            .describe('SHA-256 hex digest of the uploaded file\'s bytes; re-verified server-side against the stored object (422 FILE_HASH_MISMATCH on a mismatch).'),
+          mime: z.string(),
+          bytes: z.number().int().min(0),
+        }),
+      )
       .max(30)
       .default([]),
     device: z.string().max(100).nullable().default(null),
     appVersion: z.string().max(30).nullable().default(null),
-    offline: z.boolean().default(false),
+    offline: z.boolean().default(false).describe('Set when this POD was captured while the phone was offline and is being submitted after reconnecting.'),
   })
   .and(GpsFields);
 export type PodInputT = z.infer<typeof PodInput>;

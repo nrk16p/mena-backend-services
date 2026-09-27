@@ -15,19 +15,25 @@ export const uploadRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['driver'],
+        summary: 'Get a presigned upload link for a POD photo/signature',
+        description:
+          'Driver-only, first step of the POD upload flow: presign here → `PUT` the file to `url` with the returned `headers` → compute its ' +
+          'sha256 → submit it in POST /driver/pods `files[]` referencing the returned `key`. The delivery order must be on a stop of one of the ' +
+          'caller\'s own shipments (404 `Delivery order` otherwise) and the shipment must be in a status a driver may write to (422 ' +
+          '`SHIPMENT_NOT_ACTIVE` otherwise). The link expires after `expiresInSec` (5 minutes); the upload must not exceed `maxBytes`.',
         body: z.object({
           shipmentId: objectIdString,
-          doId: objectIdString,
-          contentType: z.enum(Object.keys(UPLOAD_TYPES) as [UploadType, ...UploadType[]]),
+          doId: objectIdString.describe('The delivery order this file is evidence for; must be on a stop of the caller\'s shipment.'),
+          contentType: z.enum(Object.keys(UPLOAD_TYPES) as [UploadType, ...UploadType[]]).describe('MIME type of the file to upload; determines the file extension used in the returned key.'),
         }),
         response: {
           200: z.object({
-            key: z.string(),
-            url: z.string(),
+            key: z.string().describe('Storage key to reference in POST /driver/pods files[].key once the PUT below succeeds.'),
+            url: z.string().describe('Presigned URL to PUT the file to directly (not through this API).'),
             method: z.literal('PUT'),
-            headers: z.object({ 'Content-Type': z.string() }),
-            expiresInSec: z.number(),
-            maxBytes: z.number(),
+            headers: z.object({ 'Content-Type': z.string() }).describe('Headers that must be sent with the PUT request, exactly as given.'),
+            expiresInSec: z.number().describe('How long the presigned URL stays valid.'),
+            maxBytes: z.number().describe('Maximum upload size the server will accept for this file.'),
           }),
         },
       },
