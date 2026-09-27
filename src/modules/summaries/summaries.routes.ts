@@ -60,7 +60,15 @@ export const summaryRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get(
     '/shipments/:id/summary',
-    { schema: { tags: ['shipments'], params: IdParams, response: { 200: TripSummaryItem } }, preHandler: app.requireRoles(...STAFF_ROLES) },
+    {
+      schema: {
+        tags: ['shipments'],
+        description: 'Returns 404 both when the shipment does not exist and when it exists but has not been closed yet (no trip summary).',
+        params: IdParams,
+        response: { 200: TripSummaryItem },
+      },
+      preHandler: app.requireRoles(...STAFF_ROLES),
+    },
     async (req) => {
       const s = await app.db.collection<TripSummaryDoc>(C.tripSummaries).findOne({ shipmentId: new ObjectId(req.params.id) });
       if (!s) throw notFound('Trip summary');

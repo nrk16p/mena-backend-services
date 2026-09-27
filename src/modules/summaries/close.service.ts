@@ -38,7 +38,11 @@ export interface TripSummaryDoc {
 /**
  * COMPLETED → CLOSED, locking the evidence into a trip summary (spec §5.1). The checks run on a
  * plain read: that is safe because a verified POD is final (review only moves `submitted` PODs)
- * and every new POD or driver event bumps the shipment version, which `transition` guards.
+ * and every new POD or driver event bumps the shipment version, which `transition` guards. The
+ * one gap a shipment-version guard can't close — another write landing on a *DO* document between
+ * that read and the commit (a manual job-group assignment, say) — is covered separately: `inTx`
+ * re-touches every DO it depends on inside the transaction, so MongoDB's write-conflict detection
+ * aborts (and retries) whichever side loses the race.
  */
 export async function closeShipment(
   app: FastifyInstance,
@@ -101,9 +105,22 @@ export async function closeShipment(
     by,
     notAllowedCode: 'SHIPMENT_NOT_COMPLETED',
     inTx: async (session) => {
+      // Re-touch every DO this close depends on (already known to be POD_VERIFIED or FAILED from
+      // the plain read above) so a concurrent write to any of them — another verify/reject, a
+      // manual job-group assignment, a release — conflicts with this transaction at commit time
+      // instead of silently racing past the checks already done outside it.
+      const doIds = dos.map((d) => d._id);
+      const guard = await app.db
+        .collection<DeliveryOrderDoc>(C.deliveryOrders)
+        .updateMany({ _id: { $in: doIds }, status: { $in: ['POD_VERIFIED', 'FAILED'] } }, { $set: { updatedAt: now } }, { session });
+      if (guard.matchedCount !== doIds.length) {
+        throw unprocessable('PODS_NOT_VERIFIED', 'A delivery order changed while closing; reload and try again', { doNos: dos.map((d) => d.doNo) });
+      }
       await app.db.collection<TripSummaryDoc>(C.tripSummaries).insertOne(summary, { session });
+      const releasedDoNos = dos.filter((d) => d.status === 'FAILED').map((d) => d.doNo).sort();
       // Failed DOs go back to the pool through the same job-group re-match as any release (P3-R6); attempts[] is kept.
       await releaseDos(app.db, shipment._id, session, { status: 'FAILED' });
+      return { releasedDoNos };
     },
   });
   return { shipment: updated, summary };

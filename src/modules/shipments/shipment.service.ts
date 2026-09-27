@@ -331,8 +331,11 @@ export async function transition(
     by: string;
     notAllowedCode: string;
     releaseDos?: boolean;
-    /** Extra writes that must commit with the transition (e.g. the trip summary on close). */
-    inTx?: (session: ClientSession, updated: ShipmentDoc) => Promise<void>;
+    /**
+     * Extra writes that must commit with the transition (e.g. the trip summary on close). May
+     * return extra fields to fold into the audit entry's `after` (e.g. `releasedDoNos`).
+     */
+    inTx?: (session: ClientSession, updated: ShipmentDoc) => Promise<Record<string, unknown> | void>;
   },
 ): Promise<ShipmentDoc> {
   if (!opts.from.includes(existing.status)) {
@@ -348,13 +351,21 @@ export async function transition(
     );
     if (!updated) throw versionConflict();
     if (opts.releaseDos) await releaseDos(app.db, existing._id, session);
-    if (opts.inTx) await opts.inTx(session, updated);
+    const extra = opts.inTx ? await opts.inTx(session, updated) : undefined;
     // `after` includes every field the caller actually set (e.g. `driverResponse` with a decline
-    // reason, or `dispatch`), not just `status`, so the audit trail shows what changed.
+    // reason, or `dispatch`), not just `status`, plus whatever `inTx` reported, so the audit
+    // trail shows what changed.
     const changed = Object.fromEntries(Object.keys(opts.set).map((k) => [k, (updated as unknown as Record<string, unknown>)[k]]));
     await writeAudit(
       app.db,
-      { entity: 'shipment', entityId: existing._id.toHexString(), action: opts.action, by: opts.by, before: { status: existing.status }, after: toApi(changed) },
+      {
+        entity: 'shipment',
+        entityId: existing._id.toHexString(),
+        action: opts.action,
+        by: opts.by,
+        before: { status: existing.status },
+        after: toApi({ ...changed, ...(extra ?? {}) }),
+      },
       { session },
     );
     return updated;
