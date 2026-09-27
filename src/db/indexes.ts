@@ -46,6 +46,12 @@ export const INDEXES: Record<string, IndexDescription[]> = {
     { key: { resourceType: 1, resourceId: 1, from: 1, to: 1 } },
     { key: { cancelledAt: 1, from: 1 } },
   ],
+  [C.palletMovements]: [
+    { key: { clientEventId: 1 }, unique: true, partialFilterExpression: { clientEventId: { $type: 'string' } } },
+    { key: { tailVehicleId: 1, _id: 1 } },
+    { key: { driverId: 1, _id: 1 } },
+  ],
+  [C.palletBalances]: [{ key: { tailVehicleId: 1 }, unique: true }],
   [C.shipments]: [
     { key: { shipmentNo: 1 }, unique: true },
     { key: { status: 1, plannedStart: 1 } },

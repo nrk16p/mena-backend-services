@@ -6,6 +6,7 @@ import { eventRoutes } from './modules/execution/events.routes.js';
 import { importRoutes } from './modules/imports/imports.routes.js';
 import { masterRoutes } from './modules/master/master.routes.js';
 import { orderRoutes } from './modules/orders/orders.routes.js';
+import { palletRoutes } from './modules/pallets/pallets.routes.js';
 import { podTemplateRoutes } from './modules/pod-templates/pod-templates.routes.js';
 import { podRoutes } from './modules/pods/pods.routes.js';
 import { driverRoutes } from './modules/shipments/driver.routes.js';
@@ -25,6 +26,7 @@ export const apiRoutes: FastifyPluginAsyncZod = async (api) => {
   await api.register(shipmentRoutes);
   await api.register(driverRoutes);
   await api.register(eventRoutes);
+  await api.register(palletRoutes);
   await api.register(uploadRoutes);
   await api.register(podRoutes);
 };
