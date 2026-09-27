@@ -20,6 +20,14 @@ export const INDEXES: Record<string, IndexDescription[]> = {
   [C.vehicles]: [{ key: { plate: 1 }, unique: true }, { key: { truckTypeId: 1 } }, { key: { gpsId: 1 } }],
   [C.drivers]: [{ key: { code: 1 }, unique: true }],
   [C.jobGroups]: [{ key: { clientId: 1, code: 1 }, unique: true }, { key: { clientId: 1, active: 1 } }],
+  [C.podTemplates]: [
+    { key: { clientId: 1, jobGroupId: 1, status: 1, version: -1 } },
+    {
+      key: { clientId: 1, jobGroupId: 1, version: 1 },
+      unique: true,
+      partialFilterExpression: { status: 'published' },
+    },
+  ],
 };
 
 export async function ensureIndexes(db: Db): Promise<void> {
