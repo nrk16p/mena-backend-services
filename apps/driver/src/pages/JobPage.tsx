@@ -9,9 +9,11 @@ import { Textarea } from '@/components/ui/textarea';
 import { ApiError, apiFetch } from '@shared/api';
 import { STEP_TH, nextStep } from '@shared/steps';
 import type { DriverShipment, EventItem } from '@shared/types';
+import PermissionBanner from '@/components/PermissionBanner';
 import { createTapSender, type EventResult } from '../lib/events';
 import { getPosition } from '../lib/gps';
 import { podActionState } from '../lib/podAction';
+import { useWakeLock } from '../lib/useWakeLock';
 
 const REASONS = ['TRAFFIC', 'BREAKDOWN', 'WEATHER', 'CHECKPOINT', 'CONSIGNEE_CLOSED', 'NO_RECEIVER', 'WRONG_ADDRESS', 'OTHER'];
 const tap = createTapSender((body) => apiFetch<{ results: EventResult[] }>('POST', '/api/v1/driver/events', body));
@@ -22,6 +24,7 @@ export default function JobPage() {
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ code: string; reason: string; note: string } | null>(null);
+  useWakeLock(true);
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: async () => (await apiFetch<{ items: DriverShipment[] }>('GET', '/api/v1/driver/shipments')).items });
   const events = useQuery({ queryKey: ['job-events', id], queryFn: async () => (await apiFetch<{ items: EventItem[] }>('GET', `/api/v1/driver/shipments/${id}/events`)).items });
   const job = jobs.data?.find((j) => j.id === id);
@@ -34,6 +37,8 @@ export default function JobPage() {
   const locName = new Map(job.locations.map((l) => [l.id, l.name]));
   const dos = new Map(job.deliveryOrders.map((d) => [d.id, d]));
   const current = job.stops.find((s) => !(done.get(s.stopId)?.has('DEPARTED')));
+  const currentDone = current ? (done.get(current.stopId) ?? new Set<string>()) : new Set<string>();
+  const currentNext = current ? nextStep(current, currentDone) : null;
 
   const send = async (stopId: string | null, code: string, extra: { reasonCode?: string; note?: string } = {}) => {
     setBusy(true);
@@ -53,6 +58,7 @@ export default function JobPage() {
 
   return (
     <div className="space-y-3 p-4">
+      <PermissionBanner />
       <div className="flex items-center justify-between">
         <button onClick={() => nav('/')} className="text-blue-700">
           ← งานของฉัน
@@ -62,7 +68,6 @@ export default function JobPage() {
       {job.stops.map((s) => {
         const d = done.get(s.stopId) ?? new Set<string>();
         const isCurrent = current?.stopId === s.stopId;
-        const next = nextStep(s, d);
         const extras = [...new Set([...s.dropDoIds, ...s.pickupDoIds].flatMap((x) => dos.get(x)?.podForm.extraSteps ?? []))].filter((c) => !d.has(c));
         return (
           <div key={s.stopId} className={`space-y-2 rounded-lg border p-4 ${isCurrent ? 'border-blue-600 bg-white shadow' : 'bg-neutral-100'}`}>
@@ -76,11 +81,6 @@ export default function JobPage() {
               {s.pickupDoIds.length > 0 && `รับ: ${s.pickupDoIds.map((x) => dos.get(x)?.doNo).join(', ')} `}
               {s.dropDoIds.length > 0 && `ส่ง: ${s.dropDoIds.map((x) => dos.get(x)?.doNo).join(', ')}`}
             </p>
-            {isCurrent && next && (
-              <Button className="h-14 w-full text-lg" disabled={busy} onClick={() => void send(s.stopId, next)}>
-                {STEP_TH[next] ?? next}
-              </Button>
-            )}
             {isCurrent &&
               s.dropDoIds.map((doId) => {
                 const o = dos.get(doId);
@@ -116,6 +116,13 @@ export default function JobPage() {
           </div>
         );
       })}
+      {current && currentNext && (
+        <div className="sticky bottom-0 -mx-4 border-t bg-white p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+          <Button className="h-14 w-full text-lg" disabled={busy} onClick={() => void send(current.stopId, currentNext)}>
+            {STEP_TH[currentNext] ?? currentNext}
+          </Button>
+        </div>
+      )}
       <Button variant="outline" className="h-12 w-full" onClick={() => setProblem({ code: 'DELAYED', reason: 'TRAFFIC', note: '' })}>
         แจ้งปัญหา / ล่าช้า
       </Button>

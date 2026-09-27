@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { ApiError, apiFetch, logout } from '@shared/api';
 import { fmtBkk } from '@shared/time';
 import type { DriverShipment } from '@shared/types';
+import PermissionBanner from '@/components/PermissionBanner';
 import { canSubmitReason } from '@/lib/decline';
 
 const TH: Record<string, string> = { DISPATCHED: 'งานใหม่', ACCEPTED: 'รับงานแล้ว', IN_TRANSIT: 'กำลังวิ่ง' };
@@ -38,6 +39,7 @@ export default function JobsPage() {
   };
   return (
     <div className="space-y-3 p-4">
+      <PermissionBanner />
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">งานของฉัน</h1>
         <div className="flex gap-2">

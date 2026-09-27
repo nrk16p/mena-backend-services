@@ -14,6 +14,7 @@ import SignaturePad from '../components/SignaturePad';
 import { getPosition } from '../lib/gps';
 import { compressImage } from '../lib/image';
 import { uploadFile } from '../lib/upload';
+import { useWakeLock } from '../lib/useWakeLock';
 
 // A reasonable, driver-facing subset of the backend's reason-code enum (spec: SHORTAGE, OVERAGE,
 // DAMAGED, REFUSED_FULL, REFUSED_PARTIAL, CONSIGNEE_CLOSED, NO_RECEIVER, WRONG_ADDRESS,
@@ -61,6 +62,7 @@ export default function PodPage() {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [issues, setIssues] = useState<Issue[]>([]);
+  useWakeLock(true);
   if (!job || !d) return <p className="p-4">กำลังโหลด…</p>;
   const fields = failed ? d.podForm.fields.filter((f) => f.type === 'photo') : d.podForm.fields;
   const set = (k: string, v: unknown) => setAnswers((a) => ({ ...a, [k]: v }));
