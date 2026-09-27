@@ -5,6 +5,7 @@ import { ObjectId } from 'mongodb';
 import { forbidden, unauthorized } from '../lib/errors.js';
 import type { Principal, UserPrincipal } from '../lib/principal.js';
 import type { Role } from '../lib/roles.js';
+import { authenticateApiKey } from '../modules/api-keys/api-keys.service.js';
 import { findUserById } from '../modules/users/users.repo.js';
 
 export type AccessClaims = { sub: string; roles: Role[] };
@@ -15,6 +16,7 @@ declare module 'fastify' {
   }
   interface FastifyInstance {
     requireRoles: (...roles: Role[]) => preHandlerAsyncHookHandler;
+    requireScope: (scope: string) => preHandlerAsyncHookHandler;
   }
 }
 
@@ -57,6 +59,17 @@ export default fp(
       return async (req) => {
         const principal = await loadUserPrincipal(req);
         if (roles.length > 0 && !principal.roles.some((r) => roles.includes(r))) throw forbidden();
+        req.principal = principal;
+      };
+    });
+
+    app.decorate('requireScope', (scope: string): preHandlerAsyncHookHandler => {
+      return async (req) => {
+        const raw = req.headers['x-api-key'];
+        if (typeof raw !== 'string' || raw.length === 0) throw unauthorized('API key required', 'API_KEY_REQUIRED');
+        const principal = await authenticateApiKey(app.db, app.config.API_KEY_PEPPER, raw);
+        if (!principal) throw unauthorized('Invalid API key', 'INVALID_API_KEY');
+        if (!principal.scopes.includes(scope)) throw forbidden(`API key lacks scope ${scope}`);
         req.principal = principal;
       };
     });

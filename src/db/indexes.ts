@@ -8,6 +8,7 @@ export const INDEXES: Record<string, IndexDescription[]> = {
     { key: { driverId: 1 }, unique: true, partialFilterExpression: { driverId: { $type: 'objectId' } } },
   ],
   [C.refreshTokens]: [{ key: { familyId: 1 } }, { key: { userId: 1 } }, { key: { expiresAt: 1 }, expireAfterSeconds: 0 }],
+  [C.apiKeys]: [{ key: { active: 1 } }],
   [C.auditLog]: [{ key: { entity: 1, entityId: 1, at: -1 } }],
 };
 
