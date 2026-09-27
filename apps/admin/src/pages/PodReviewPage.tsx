@@ -23,16 +23,29 @@ export default function PodReviewPage() {
     queryFn: () => apiFetch<Page<Pod>>('GET', '/api/v1/pods?status=submitted&limit=100'),
     refetchInterval: 10_000,
   });
-  const detail = useQuery({ queryKey: ['pod', selected], queryFn: () => apiFetch<Pod>('GET', `/api/v1/pods/${selected}`), enabled: !!selected });
+  // Photo links are presigned for 5 minutes; refresh the detail before they expire.
+  const detail = useQuery({
+    queryKey: ['pod', selected],
+    queryFn: () => apiFetch<Pod>('GET', `/api/v1/pods/${selected}`),
+    enabled: !!selected,
+    refetchInterval: 240_000,
+  });
   const review = useMutation({
     mutationFn: ({ action, reason }: { action: 'verify' | 'reject'; reason?: string }) =>
       apiFetch<Pod>('POST', `/api/v1/pods/${selected}/${action}`, action === 'reject' ? { reason } : {}),
     onSuccess: (p) => {
       toast.success(p.status === 'verified' ? 'ผ่านแล้ว' : 'ตีกลับแล้ว');
       setSelected(null);
+      setRejectOpen(false);
+      setRejectReason('');
       void qc.invalidateQueries({ queryKey: ['pods'] });
     },
-    onError: (e) => toast.error(describeError(e, 'ทำรายการไม่สำเร็จ')),
+    onError: (e) => {
+      toast.error(describeError(e, 'ทำรายการไม่สำเร็จ'));
+      // Someone else may have reviewed it meanwhile: reload the queue and this POD.
+      void qc.invalidateQueries({ queryKey: ['pods'] });
+      void qc.invalidateQueries({ queryKey: ['pod', selected] });
+    },
   });
   const p = detail.data;
   const canReview = hasRole('admin') || hasRole('planner');
@@ -40,8 +53,6 @@ export default function PodReviewPage() {
     const reason = rejectReason.trim();
     if (reason.length < 3) return;
     review.mutate({ action: 'reject', reason });
-    setRejectOpen(false);
-    setRejectReason('');
   };
   return (
     <div className="grid gap-4 md:grid-cols-3">
