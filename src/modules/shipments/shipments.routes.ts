@@ -27,9 +27,26 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
     if (!doc) throw notFound('Shipment');
     return doc;
   };
-  const Version = z.object({ version: z.number().int().positive() });
+  const Version = z.object({ version: z.number().int().positive().describe('The version you last saw for this shipment; a stale value returns 409 VERSION_CONFLICT.') });
 
-  app.post('/shipments/validate', { schema: { tags: ['shipments'], body: ValidateBody, response: { 200: ValidateResponse } }, preHandler: write }, async (req) => {
+  app.post(
+    '/shipments/validate',
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Validate a shipment draft',
+        description:
+          'Runs every planning rule (vehicle/driver slot rules, delivery-order availability and routing, double-booking, availability blocks, ' +
+          'licence expiry, days off, holidays) against a draft without saving anything. Callable by admin or planner. ' +
+          '`mode: "draft"` (default) treats missing head/tail/DOs/stops as warnings so an incomplete plan can still be saved as a DRAFT; ' +
+          '`mode: "planned"` turns those same gaps into errors, matching what `/shipments/:id/plan` and `/shipments/:id/dispatch` require. ' +
+          'Pass `shipmentId` when validating an edit to an existing shipment so its own DOs and resource bookings aren\'t flagged as conflicts with themselves.',
+        body: ValidateBody,
+        response: { 200: ValidateResponse },
+      },
+      preHandler: write,
+    },
+    async (req) => {
     const { shipmentId, mode, ...input } = req.body;
     const draft = await toDraft(app.db, input);
     const result = await validateShipment(app.db, draft, { shipmentId: shipmentId ? new ObjectId(shipmentId) : undefined, mode });
@@ -41,20 +58,41 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
     };
   });
 
-  app.post('/shipments', { schema: { tags: ['shipments'], body: ShipmentInput, response: { 201: ShipmentWithWarnings } }, preHandler: write }, async (req, reply) => {
-    const { doc } = await createShipment(app, req.body, actorOf(req));
-    return reply.status(201).send(shipmentView(doc));
-  });
+  app.post(
+    '/shipments',
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Create a shipment draft',
+        description:
+          'Creates a shipment with status `DRAFT` (validated with `mode: "draft"`, so a head/tail vehicle, driver, or DOs may still be missing). ' +
+          'Callable by admin or planner. Links every delivery order named in `stops`/`doIds` to this shipment (they must be `UNASSIGNED`, or already ' +
+          'on this shipment) and books its vehicle(s)/driver(s) for the planned window. 422 `SHIPMENT_INVALID` with the same `errors`/`warnings` shape ' +
+          'as `/shipments/validate` if a rule fails; 409 `RESOURCE_TAKEN`/`DO_TAKEN` on a booking race with another concurrent create.',
+        body: ShipmentInput,
+        response: { 201: ShipmentWithWarnings },
+      },
+      preHandler: write,
+    },
+    async (req, reply) => {
+      const { doc } = await createShipment(app, req.body, actorOf(req));
+      return reply.status(201).send(shipmentView(doc));
+    },
+  );
 
   app.get(
     '/shipments',
     {
       schema: {
         tags: ['shipments'],
+        summary: 'List shipments',
+        description:
+          'Lists shipments, cursor-paginated. Callable by admin, planner or viewer. Filter by `status`, a planned-window overlap (`from`/`to`), ' +
+          '`vehicleId`/`driverId` (matches either the head or the tail slot), or `truckTypeId` (matches the head vehicle\'s truck type).',
         querystring: PageQuery.extend({
           status: z.enum(SHIPMENT_STATUSES).optional(),
-          from: z.string().datetime({ offset: true }).optional(),
-          to: z.string().datetime({ offset: true }).optional(),
+          from: z.string().datetime({ offset: true }).optional().describe('Only shipments whose plannedEnd is after this ISO instant.'),
+          to: z.string().datetime({ offset: true }).optional().describe('Only shipments whose plannedStart is before this ISO instant.'),
           vehicleId: objectIdString.optional(),
           driverId: objectIdString.optional(),
           truckTypeId: objectIdString.optional(),
@@ -97,7 +135,18 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.post(
     '/shipments/bulk',
-    { schema: { tags: ['shipments'], body: z.object({ items: z.array(ShipmentInput).min(1).max(100) }), response: { 200: z.object({ results: z.array(BulkShipmentResult) }) } }, preHandler: write },
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Create up to 100 shipment drafts at once',
+        description:
+          'Callable by admin or planner. Each item is created independently (its own transaction, `mode: "draft"` validation); one item failing ' +
+          'does not stop the others. `results[i].ok` reports success per item, with `errors`/`warnings` on failure.',
+        body: z.object({ items: z.array(ShipmentInput).min(1).max(100) }),
+        response: { 200: z.object({ results: z.array(BulkShipmentResult) }) },
+      },
+      preHandler: write,
+    },
     async (req) => {
       const by = actorOf(req);
       const results: z.infer<typeof BulkShipmentResult>[] = [];
@@ -124,7 +173,16 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get(
     '/shipments/:id',
-    { schema: { tags: ['shipments'], params: IdParams, response: { 200: ShipmentItem.extend({ deliveryOrders: z.array(DoItem) }) } }, preHandler: read },
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Get a shipment by id, with its delivery orders',
+        description: 'Callable by admin, planner or viewer. Includes the full delivery order (ใบสั่งส่ง) records for every stop on the shipment. 404 if the id does not exist.',
+        params: IdParams,
+        response: { 200: ShipmentItem.extend({ deliveryOrders: z.array(DoItem) }) },
+      },
+      preHandler: read,
+    },
     async (req) => {
       const doc = await load(req.params.id);
       const dos = await app.db.collection<DeliveryOrderDoc>(C.deliveryOrders).find({ _id: { $in: doIdsOf(doc.stops) } }).toArray();
@@ -134,11 +192,41 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.patch(
     '/shipments/:id',
-    { schema: { tags: ['shipments'], params: IdParams, body: ShipmentInput.partial().extend({ version: z.number().int().positive() }), response: { 200: ShipmentItem } }, preHandler: write },
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Edit a shipment draft or planned shipment',
+        description:
+          'Callable by admin or planner. Only `DRAFT`, `PLANNED`, `DISPATCHED` or `ACCEPTED` shipments may be edited (422 `SHIPMENT_NOT_EDITABLE` ' +
+          'otherwise). Re-validates the whole shipment (`mode: "draft"` while still DRAFT, `mode: "planned"` afterwards) and re-links its delivery ' +
+          'orders and vehicle/driver bookings. Editing a non-DRAFT shipment reverts it to `PLANNED` and clears any dispatch/driver response. ' +
+          'Send the `version` you last saw; 409 `VERSION_CONFLICT` if it is stale.',
+        params: IdParams,
+        body: ShipmentInput.partial().extend({ version: z.number().int().positive().describe('The version last seen for this shipment; a stale value returns 409 VERSION_CONFLICT.') }),
+        response: { 200: ShipmentItem },
+      },
+      preHandler: write,
+    },
     async (req) => shipmentView(await updateShipment(app, await load(req.params.id), req.body, actorOf(req))),
   );
 
-  app.post('/shipments/:id/plan', { schema: { tags: ['shipments'], params: IdParams, body: Version, response: { 200: ShipmentItem } }, preHandler: write }, async (req) => {
+  app.post(
+    '/shipments/:id/plan',
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Mark a draft shipment as planned',
+        description:
+          'DRAFT → PLANNED. Callable by admin or planner. Re-validates with `mode: "planned"` (head vehicle, driver(s), stops and DOs are now ' +
+          'required); 422 `SHIPMENT_INVALID` if any rule still fails. 422 `SHIPMENT_NOT_DRAFT` if the shipment is not currently DRAFT. ' +
+          'Send the `version` you last saw; 409 `VERSION_CONFLICT` if it is stale.',
+        params: IdParams,
+        body: Version,
+        response: { 200: ShipmentItem },
+      },
+      preHandler: write,
+    },
+    async (req) => {
     const existing = await load(req.params.id);
     const set: Partial<ShipmentDoc> = { status: 'PLANNED' };
     if (existing.status === 'DRAFT') {
@@ -151,7 +239,23 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
     );
   });
 
-  app.post('/shipments/:id/dispatch', { schema: { tags: ['shipments'], params: IdParams, body: Version, response: { 200: ShipmentItem } }, preHandler: write }, async (req) => {
+  app.post(
+    '/shipments/:id/dispatch',
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Dispatch a planned shipment to its driver(s)',
+        description:
+          'PLANNED → DISPATCHED. Callable by admin or planner. Re-validates with `mode: "planned"` first (422 `SHIPMENT_INVALID` if a rule now ' +
+          'fails); 422 `SHIPMENT_NOT_PLANNED` if the shipment is not currently PLANNED. The shipment then shows up in the driver app\'s job list ' +
+          '(GET /driver/shipments) for the head/tail driver to accept or decline. Send the `version` you last saw; 409 `VERSION_CONFLICT` if it is stale.',
+        params: IdParams,
+        body: Version,
+        response: { 200: ShipmentItem },
+      },
+      preHandler: write,
+    },
+    async (req) => {
     const existing = await load(req.params.id);
     if (existing.status !== 'PLANNED') throw unprocessable('SHIPMENT_NOT_PLANNED', `Cannot dispatch a ${existing.status} shipment`);
     const result = await validateShipment(app.db, draftFromDoc(existing), { shipmentId: existing._id, mode: 'planned' });
@@ -171,7 +275,20 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.post(
     '/shipments/:id/cancel',
-    { schema: { tags: ['shipments'], params: IdParams, body: Version.extend({ reason: z.string().trim().min(3).max(500) }), response: { 200: ShipmentItem } }, preHandler: write },
+    {
+      schema: {
+        tags: ['shipments'],
+        summary: 'Cancel a shipment',
+        description:
+          'Callable by admin or planner. Allowed from `DRAFT`, `PLANNED`, `DISPATCHED` or `ACCEPTED` (422 `SHIPMENT_NOT_CANCELLABLE` from any other ' +
+          'status, e.g. once IN_TRANSIT). Releases every delivery order back to the unassigned pool (re-matching their job group). ' +
+          'Send the `version` you last saw; 409 `VERSION_CONFLICT` if it is stale.',
+        params: IdParams,
+        body: Version.extend({ reason: z.string().trim().min(3).max(500).describe('Why this shipment is being cancelled.') }),
+        response: { 200: ShipmentItem },
+      },
+      preHandler: write,
+    },
     async (req) =>
       shipmentView(
         await transition(app, await load(req.params.id), {

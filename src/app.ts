@@ -42,10 +42,21 @@ export async function buildApp(config: Config) {
   await app.register(authPlugin);
   await app.register(apiRoutes, { prefix: '/api/v1' });
 
-  app.get('/health', { schema: { tags: ['system'] } }, async () => {
-    await app.db.command({ ping: 1 });
-    return { status: 'ok' };
-  });
+  app.get(
+    '/health',
+    {
+      schema: {
+        tags: ['system'],
+        summary: 'Check service liveness',
+        description:
+          'Pings the database and returns `{ status: "ok" }` if reachable. Open, no authentication required — used by uptime checks and load balancers, not by the admin panel or driver app.',
+      },
+    },
+    async () => {
+      await app.db.command({ ping: 1 });
+      return { status: 'ok' };
+    },
+  );
 
   return app;
 }

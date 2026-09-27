@@ -21,11 +21,16 @@ import { type GeofenceTarget, doneStepsAt, geofenceTarget } from './stop-context
 
 export const EventInput = z
   .object({
-    clientEventId: z.string().uuid(),
+    clientEventId: z.string().uuid().describe('UUID generated on the phone for this event; replaying the same id returns the original result as a duplicate instead of recording it twice.'),
     shipmentId: objectIdString,
-    stopId: objectIdString.nullable().default(null),
-    code: z.enum(EVENT_CODES),
-    reasonCode: z.enum(REASON_CODES).nullable().default(null),
+    stopId: objectIdString
+      .nullable()
+      .default(null)
+      .describe('Required for stop-sequence events (ARRIVED, UNLOAD_START/END, LOAD_START/END, DEPARTED) and extra steps (DOCS_SUBMITTED, etc.); omit/null for global events (DELAYED, BREAKDOWN, EXCEPTION).'),
+    code: z
+      .enum(EVENT_CODES)
+      .describe('The step being recorded. Stop steps run in a fixed order (ARRIVED → UNLOAD_START → UNLOAD_END → LOAD_START → LOAD_END → DEPARTED, skipping unload/load when the stop has no drops/pickups); global events (DELAYED, BREAKDOWN, EXCEPTION) apply to the whole shipment.'),
+    reasonCode: z.enum(REASON_CODES).nullable().default(null).describe('Required when code is EXCEPTION (422 REASON_REQUIRED otherwise); "OTHER" additionally requires a `note` (422 NOTE_REQUIRED).'),
     note: z.string().trim().max(500).nullable().default(null),
   })
   .and(GpsFields);

@@ -28,7 +28,9 @@ export const PodItem = z.object({
   reasonCode: z.string().nullable(),
   note: z.string().nullable(),
   answers: z.record(z.unknown()),
-  files: z.array(z.object({ fieldKey: z.string(), key: z.string(), sha256: z.string(), mime: z.string(), bytes: z.number() })),
+  files: z
+    .array(z.object({ fieldKey: z.string(), key: z.string(), sha256: z.string().describe('SHA-256 hex digest of the uploaded file, re-verified server-side against the stored object bytes.'), mime: z.string(), bytes: z.number() }))
+    .describe('Photos/signatures already uploaded via POST /uploads/presign + PUT; every key must have been verified to exist with a matching sha256 before this POD can be submitted.'),
   evidence: z.object({
     deviceTime: z.string(),
     receivedAt: z.string(),
@@ -39,13 +41,13 @@ export const PodItem = z.object({
     geofenceDistanceM: z.number().nullable(),
     device: z.string().nullable(),
     appVersion: z.string().nullable(),
-    offline: z.boolean(),
+    offline: z.boolean().describe('Whether this POD was captured while the phone was offline and submitted later.'),
   }),
-  hash: z.string(),
-  flags: z.array(z.string()),
-  status: z.enum(['submitted', 'verified', 'rejected']),
-  review: z.object({ by: z.string(), at: z.string(), reason: z.string().nullable() }).nullable(),
-  supersedesPodId: z.string().nullable(),
+  hash: z.string().describe('SHA-256 tamper-evidence hash over the POD\'s contents and evidence, computed at submission and re-checked whenever the trip summary or its PDF is (re)built.'),
+  flags: z.array(z.string()).describe('GPS/timing quality flags (NO_GPS, LOW_ACCURACY, OUTSIDE_GEOFENCE, LATE_SYNC) — informational, never block submission.'),
+  status: z.enum(['submitted', 'verified', 'rejected']).describe('submitted (awaiting review) → verified or rejected by an admin/planner via /pods/:id/verify or /reject. A rejected POD can be resubmitted by the driver.'),
+  review: z.object({ by: z.string(), at: z.string(), reason: z.string().nullable() }).nullable().describe('Who reviewed this POD and when; reason is set on rejection, null on verification.'),
+  supersedesPodId: z.string().nullable().describe('The rejected POD this one replaces, when the driver resubmitted after a rejection; null otherwise.'),
   by: z.string(),
   // Batched-lookup extras (P3-R12): present on /pods list & detail, absent from the driver submit response.
   doNo: z.string().optional(),
@@ -66,7 +68,23 @@ export const podRoutes: FastifyPluginAsyncZod = async (app) => {
   // 201 for a new POD; 200 with the stored POD when this clientPodId was already used (offline replay).
   app.post(
     '/driver/pods',
-    { schema: { tags: ['driver'], body: PodInput, response: { 200: PodItem, 201: PodItem } }, preHandler: app.requireRoles('driver') },
+    {
+      schema: {
+        tags: ['driver'],
+        summary: 'Submit a proof of delivery (POD)',
+        description:
+          'Driver-only. Last step of the POD flow: presign an upload (POST /uploads/presign) → PUT the file with the returned headers → compute its ' +
+          'sha256 → submit it here referencing that file key. Requires `UNLOAD_END` already recorded at the drop stop for `outcome: "DELIVERED"`, or ' +
+          '`ARRIVED` for `outcome: "FAILED"` (422 `STEP_REQUIRED` otherwise); `outcome: "FAILED"` needs a `reasonCode` (422 `REASON_REQUIRED`), and ' +
+          '`reasonCode: "OTHER"` needs a `note` (422 `NOTE_REQUIRED`). Answers are checked against the client/job-group\'s POD form (422 `POD_INVALID`), ' +
+          'and every file is verified to exist in storage with a matching sha256 (`FILE_MISSING`/`FILE_TOO_LARGE`/`FILE_HASH_MISMATCH`). ' +
+          '`clientPodId` is a UUID generated on the phone: replaying it returns 200 with the original POD instead of creating a duplicate (a fresh ' +
+          'submission is 201). Submitting after a rejection is allowed and supersedes the rejected POD.',
+        body: PodInput,
+        response: { 200: PodItem, 201: PodItem },
+      },
+      preHandler: app.requireRoles('driver'),
+    },
     async (req, reply) => {
       const { pod, duplicate } = await submitPod(app, actorOf(req), driverIdOf(req), req.body);
       return reply.status(duplicate ? 200 : 201).send(toApi(pod));
@@ -112,11 +130,15 @@ export const podRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['pods'],
+        summary: 'List submitted PODs',
+        description:
+          'Lists proofs of delivery (POD), cursor-paginated, with `doNo`/`shipmentNo`/`driverName` resolved for display. Callable by admin, ' +
+          'planner or viewer. Filter by `status`, `shipmentId`, `doId`, or `flagged=true` for PODs with a GPS/timing quality flag needing a closer look.',
         querystring: PageQuery.extend({
           status: z.enum(['submitted', 'verified', 'rejected']).optional(),
           shipmentId: objectIdString.optional(),
           doId: objectIdString.optional(),
-          flagged: z.enum(['true', 'false']).optional(),
+          flagged: z.enum(['true', 'false']).optional().describe('"true" restricts to PODs that have at least one GPS/timing quality flag.'),
         }),
         response: { 200: pageResponse(PodItem) },
       },
@@ -137,7 +159,16 @@ export const podRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get(
     '/pods/:id',
-    { schema: { tags: ['pods'], params: IdParams, response: { 200: PodItem.extend({ fileUrls: z.array(z.object({ key: z.string(), url: z.string() })) }) } }, preHandler: staff },
+    {
+      schema: {
+        tags: ['pods'],
+        summary: 'Get a POD by id, with viewable file links',
+        description: 'Callable by admin, planner or viewer. `fileUrls` are short-lived (5 minute) presigned GET links for each uploaded file. 404 if the id does not exist.',
+        params: IdParams,
+        response: { 200: PodItem.extend({ fileUrls: z.array(z.object({ key: z.string(), url: z.string() })) }) },
+      },
+      preHandler: staff,
+    },
     async (req) => {
       const p = await load(req.params.id);
       const fileUrls = [];
@@ -177,13 +208,39 @@ export const podRoutes: FastifyPluginAsyncZod = async (app) => {
     });
   }
 
-  app.post('/pods/:id/verify', { schema: { tags: ['pods'], params: IdParams, response: { 200: PodItem } }, preHandler: reviewer }, async (req) =>
-    toApi(await review(req.params.id, actorOf(req), 'verified', null)),
+  app.post(
+    '/pods/:id/verify',
+    {
+      schema: {
+        tags: ['pods'],
+        summary: 'Verify a submitted POD',
+        description:
+          'submitted → verified. Callable by admin or planner. 422 `POD_ALREADY_REVIEWED` if the POD is not currently `submitted`, ' +
+          '422 `POD_SUPERSEDED` if a newer POD exists for the same delivery order. A verified POD counts toward the shipment being ' +
+          '`COMPLETED` and is required before the shipment can be closed.',
+        params: IdParams,
+        response: { 200: PodItem },
+      },
+      preHandler: reviewer,
+    },
+    async (req) => toApi(await review(req.params.id, actorOf(req), 'verified', null)),
   );
 
   app.post(
     '/pods/:id/reject',
-    { schema: { tags: ['pods'], params: IdParams, body: z.object({ reason: z.string().trim().min(3).max(500) }), response: { 200: PodItem } }, preHandler: reviewer },
+    {
+      schema: {
+        tags: ['pods'],
+        summary: 'Reject a submitted POD',
+        description:
+          'submitted → rejected. Callable by admin or planner. The delivery order moves to `POD_REJECTED`, letting the driver resubmit a POD for it. ' +
+          '422 `POD_ALREADY_REVIEWED` if the POD is not currently `submitted`, 422 `POD_SUPERSEDED` if a newer POD exists for the same delivery order.',
+        params: IdParams,
+        body: z.object({ reason: z.string().trim().min(3).max(500).describe('Why this POD is being rejected; shown to the driver.') }),
+        response: { 200: PodItem },
+      },
+      preHandler: reviewer,
+    },
     async (req) => toApi(await review(req.params.id, actorOf(req), 'rejected', req.body.reason)),
   );
 };

@@ -14,12 +14,12 @@ import { ShipmentItem } from './shipment.schemas.js';
 import { doIdsOf, shipmentView, transition } from './shipment.service.js';
 import type { ShipmentDoc } from './shipment.types.js';
 
-const LocationLite = z.object({ id: z.string(), code: z.string(), name: z.string(), lat: z.number(), lng: z.number(), geofenceRadiusM: z.number() });
+const LocationLite = z.object({ id: z.string(), code: z.string(), name: z.string(), lat: z.number(), lng: z.number(), geofenceRadiusM: z.number().describe('Radius in metres for the OUTSIDE_GEOFENCE flag on events/PODs recorded at this location.') });
 const PodFormOut = z.object({
-  templateId: z.string().nullable(),
-  version: z.number(),
-  extraSteps: z.array(z.string()),
-  fields: z.array(z.object({ key: z.string(), label: z.string(), type: z.string(), required: z.boolean(), min: z.number().optional(), max: z.number().optional(), unit: z.string().optional(), options: z.array(z.string()).optional() })),
+  templateId: z.string().nullable().describe('The pod-template (see pod-templates module) resolved for this DO\'s client/job group; null when the default form applies.'),
+  version: z.number().describe('Increments whenever the template changes; echoed back on the submitted POD so an old cached form is never silently accepted.'),
+  extraSteps: z.array(z.string()).describe('Optional non-sequential event codes (e.g. DOCS_SUBMITTED, SEAL_CHECKED) this client requires at the stop, in addition to the fixed ARRIVED→...→DEPARTED sequence.'),
+  fields: z.array(z.object({ key: z.string(), label: z.string(), type: z.string(), required: z.boolean(), min: z.number().optional(), max: z.number().optional(), unit: z.string().optional(), options: z.array(z.string()).optional() })).describe('The proof-of-delivery (POD) form fields to render for this DO; POST /driver/pods answers must satisfy them.'),
 });
 /** Driver-visible statuses other than COMPLETED: the jobs still to accept or drive. */
 const DRIVER_ACTIVE_STATUSES = DRIVER_VISIBLE_STATUSES.filter((st) => st !== 'COMPLETED');
@@ -32,7 +32,22 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
   const driverOnly = app.requireRoles('driver');
   const coll = () => app.db.collection<ShipmentDoc>(C.shipments);
 
-  app.get('/driver/shipments', { schema: { tags: ['driver'], response: { 200: z.object({ items: z.array(DriverShipment) }) } }, preHandler: driverOnly }, async (req) => {
+  app.get(
+    '/driver/shipments',
+    {
+      schema: {
+        tags: ['driver'],
+        summary: 'List the caller\'s job list (driver app)',
+        description:
+          'Driver-only. The signed-in user must be linked to a driver record (403 `NOT_A_DRIVER` otherwise). Returns shipments where the driver ' +
+          'is the head or tail driver: every `DISPATCHED`/`ACCEPTED`/`IN_TRANSIT` shipment, plus `COMPLETED` shipments that still have a POD to ' +
+          'resubmit after a rejection, plus the 10 most recently completed. Each shipment includes its delivery orders (with the POD form to fill ' +
+          'in for each) and the stop locations, so the app needs no further lookups to render a job.',
+        response: { 200: z.object({ items: z.array(DriverShipment) }) },
+      },
+      preHandler: driverOnly,
+    },
+    async (req) => {
     const driverId = driverIdOf(req);
     const scope = driverScope(driverId);
     // Active jobs are queried on their own so a backlog of COMPLETED-but-unclosed shipments can
@@ -79,11 +94,24 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
     return { items };
   });
 
-  const VersionBody = z.object({ version: z.number().int().positive() });
+  const VersionBody = z.object({ version: z.number().int().positive().describe('The shipment version shown in the job list; a stale value returns 409 VERSION_CONFLICT.') });
 
   app.post(
     '/driver/shipments/:id/accept',
-    { schema: { tags: ['driver'], params: IdParams, body: VersionBody, response: { 200: ShipmentItem } }, preHandler: driverOnly },
+    {
+      schema: {
+        tags: ['driver'],
+        summary: 'Accept a dispatched shipment',
+        description:
+          'DISPATCHED → ACCEPTED. Driver-only, and only for a shipment where the caller is the head or tail driver (a shipment belonging to ' +
+          'another driver is reported as 404, not 403). 422 `SHIPMENT_NOT_DISPATCHED` if the shipment is not currently DISPATCHED. Send the ' +
+          '`version` the job list showed; 409 `VERSION_CONFLICT` if the planner re-dispatched a changed plan in the meantime.',
+        params: IdParams,
+        body: VersionBody,
+        response: { 200: ShipmentItem },
+      },
+      preHandler: driverOnly,
+    },
     async (req) => {
       const driverId = driverIdOf(req);
       const existing = await loadDriverShipment(app.db, new ObjectId(req.params.id), driverId);
@@ -109,8 +137,13 @@ export const driverRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       schema: {
         tags: ['driver'],
+        summary: 'Decline a dispatched shipment',
+        description:
+          'DISPATCHED → PLANNED, so a planner can re-dispatch it (to a different driver or after fixing something). Driver-only, and only for a ' +
+          'shipment where the caller is the head or tail driver (otherwise 404, not 403). 422 `SHIPMENT_NOT_DISPATCHED` if the shipment is not ' +
+          'currently DISPATCHED. Send the `version` the job list showed; 409 `VERSION_CONFLICT` if it is stale.',
         params: IdParams,
-        body: VersionBody.extend({ reason: z.string().trim().min(3).max(500) }),
+        body: VersionBody.extend({ reason: z.string().trim().min(3).max(500).describe('Why the driver is declining this shipment.') }),
         response: { 200: ShipmentItem },
       },
       preHandler: driverOnly,

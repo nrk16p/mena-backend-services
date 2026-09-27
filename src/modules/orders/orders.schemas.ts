@@ -11,19 +11,19 @@ export const WindowInput = z
 
 export const DoFields = z.object({
   clientId: objectIdString,
-  clientRef: z.string().trim().max(60).nullable().default(null),
+  clientRef: z.string().trim().max(60).nullable().default(null).describe('The client\'s own reference for this order, shown alongside the internal doNo.'),
   serviceTypeId: objectIdString,
-  materialId: objectIdString,
-  intendedTruckTypeId: objectIdString.nullable().default(null),
+  materialId: objectIdString.describe('Determines the default `unit` when none is sent explicitly.'),
+  intendedTruckTypeId: objectIdString.nullable().default(null).describe('Truck type to match a job group against before the DO is on a shipment; once assigned, the shipment head vehicle\'s truck type takes over instead.'),
   qty: z.number().positive(),
-  unit: z.string().trim().min(1).max(20).nullable().default(null),
+  unit: z.string().trim().min(1).max(20).nullable().default(null).describe('Leave unset to inherit the unit from `materialId`.'),
   palletPlan: z.object({ type: z.string().trim().min(1).max(40), qty: z.number().int().min(0) }).nullable().default(null),
   originLocationId: objectIdString,
-  destLocationId: objectIdString,
+  destLocationId: objectIdString.describe('Must differ from originLocationId; 422 SAME_ORIGIN_DEST otherwise.'),
   pickupWindow: WindowInput.nullable().default(null),
   dropWindow: WindowInput.nullable().default(null),
-  clientKm: z.number().min(0).nullable().default(null),
-  jobGroupId: objectIdString.nullable().optional(),
+  clientKm: z.number().min(0).nullable().default(null).describe('Distance the client bills for this DO, independent of the GPS-measured trip distance.'),
+  jobGroupId: objectIdString.nullable().optional().describe('Set to assign a job group manually (locks matching to `manual`); omit to let the server auto-match one and report JOB_GROUP_NONE/JOB_GROUP_AMBIGUOUS warnings when it can\'t.'),
   note: z.string().trim().max(500).nullable().default(null),
 });
 export type DoInput = z.infer<typeof DoFields>;
@@ -39,7 +39,9 @@ export const DoItem = z.object({
   clientRef: z.string().nullable(),
   clientId: z.string(),
   jobGroupId: z.string().nullable(),
-  jobGroupMatch: z.object({ status: z.enum(MATCH_STATUSES), candidates: z.array(z.string()) }),
+  jobGroupMatch: z
+    .object({ status: z.enum(MATCH_STATUSES), candidates: z.array(z.string()) })
+    .describe('How jobGroupId was decided: "auto" (one match), "manual" (set via PATCH or /job-group), "ambiguous" (several candidates, none chosen), or "none" (no match).'),
   serviceTypeId: z.string(),
   materialId: z.string(),
   intendedTruckTypeId: z.string().nullable(),
@@ -54,8 +56,13 @@ export const DoItem = z.object({
   shipmentId: z.string().nullable(),
   pickupStopId: z.string().nullable(),
   dropStopId: z.string().nullable(),
-  status: z.enum(DO_STATUSES),
-  attempts: z.array(z.object({ shipmentId: z.string(), reasonCode: z.string(), podId: z.string(), at: z.string() })).default([]),
+  status: z.enum(DO_STATUSES).describe(
+    'UNASSIGNED → PLANNED (on a shipment) → PICKED_UP (LOAD_END recorded) → DELIVERED/POD_VERIFIED/POD_REJECTED/FAILED (from its latest proof of delivery, POD) → CANCELLED. Derived from events and PODs, not set directly.',
+  ),
+  attempts: z
+    .array(z.object({ shipmentId: z.string(), reasonCode: z.string(), podId: z.string(), at: z.string() }))
+    .default([])
+    .describe('Failed delivery attempts: one entry per FAILED POD, so a DO redelivered on a later shipment keeps its history.'),
   note: z.string().nullable(),
   cancelledAt: z.string().nullable(),
   cancelReason: z.string().nullable(),
