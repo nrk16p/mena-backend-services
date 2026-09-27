@@ -3,7 +3,7 @@ import { ObjectId, type Filter } from 'mongodb';
 import { z } from 'zod';
 import { C } from '../../db/collections.js';
 import { actorOf } from '../../lib/audit.js';
-import { notFound } from '../../lib/errors.js';
+import { notFound, unprocessable } from '../../lib/errors.js';
 import { IdParams, objectIdString } from '../../lib/ids.js';
 import { IssueSchema } from '../../lib/issues.js';
 import { PageQuery, pageResponse, paginate } from '../../lib/pagination.js';
@@ -110,6 +110,24 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
     }
     return shipmentView(
       await transition(app, existing, { version: req.body.version, from: ['DRAFT'], set: { status: 'PLANNED' }, action: 'plan', by: actorOf(req), notAllowedCode: 'SHIPMENT_NOT_DRAFT' }),
+    );
+  });
+
+  app.post('/shipments/:id/dispatch', { schema: { tags: ['shipments'], params: IdParams, body: Version, response: { 200: ShipmentItem } }, preHandler: write }, async (req) => {
+    const existing = await load(req.params.id);
+    if (existing.status !== 'PLANNED') throw unprocessable('SHIPMENT_NOT_PLANNED', `Cannot dispatch a ${existing.status} shipment`);
+    const result = await validateShipment(app.db, draftFromDoc(existing), { shipmentId: existing._id, mode: 'planned' });
+    if (result.errors.length > 0) throw invalid(result.errors, result.warnings);
+    const by = actorOf(req);
+    return shipmentView(
+      await transition(app, existing, {
+        version: req.body.version,
+        from: ['PLANNED'],
+        set: { status: 'DISPATCHED', dispatch: { at: new Date(), by, version: existing.version + 1 }, driverResponse: null },
+        action: 'dispatch',
+        by,
+        notAllowedCode: 'SHIPMENT_NOT_PLANNED',
+      }),
     );
   });
 
