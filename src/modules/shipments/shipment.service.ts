@@ -11,8 +11,9 @@ import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import { jobGroupWarnings, rematchJobGroup } from '../orders/orders.service.js';
 import { findShipmentsUsing } from './shipment.queries.js';
 import type { ShipmentInputT } from './shipment.schemas.js';
-import type { LegDoc, ShipmentDoc, StopDoc } from './shipment.types.js';
-import { type DraftStop, type VehicleLite, toDraft, validateShipment } from './shipment.validation.js';
+import { EDITABLE_STATUSES } from './shipment.types.js';
+import type { LegDoc, ShipmentDoc, ShipmentStatus, StopDoc } from './shipment.types.js';
+import { type DraftStop, type ShipmentDraft, type VehicleLite, toDraft, validateShipment } from './shipment.validation.js';
 
 const oid = (h: string) => new ObjectId(h);
 const sameIds = (a: ObjectId[], b: string[]) => a.length === b.length && a.every((x, i) => x.toHexString() === b[i]);
@@ -186,4 +187,117 @@ export async function createShipment(app: FastifyInstance, input: ShipmentInputT
 
 export function shipmentView(doc: ShipmentDoc) {
   return toApi(doc);
+}
+
+export function draftFromDoc(doc: ShipmentDoc): ShipmentDraft {
+  const slot = (s: ShipmentDoc['head']) => (s ? { vehicleId: s.vehicleId.toHexString(), driverId: s.driverId?.toHexString() ?? null } : null);
+  return {
+    plannedStart: doc.plannedStart,
+    plannedEnd: doc.plannedEnd,
+    head: slot(doc.head),
+    tail: slot(doc.tail),
+    stops: doc.stops.map((s) => ({
+      locationId: s.locationId.toHexString(),
+      plannedArrival: s.plannedArrival,
+      pickupDoIds: s.pickupDoIds.map((i) => i.toHexString()),
+      dropDoIds: s.dropDoIds.map((i) => i.toHexString()),
+    })),
+    note: doc.note,
+  };
+}
+
+const versionConflict = () => conflict('VERSION_CONFLICT', 'The shipment was changed by someone else; reload and try again');
+
+export async function updateShipment(
+  app: FastifyInstance,
+  existing: ShipmentDoc,
+  patch: Partial<ShipmentInputT> & { version: number },
+  by: string,
+): Promise<ShipmentDoc> {
+  if (!EDITABLE_STATUSES.includes(existing.status)) {
+    throw unprocessable('SHIPMENT_NOT_EDITABLE', `A ${existing.status} shipment cannot be edited`);
+  }
+  if (patch.version !== existing.version) throw versionConflict();
+  const base = draftFromDoc(existing);
+  const draft: ShipmentDraft = {
+    plannedStart: patch.plannedStart ? new Date(patch.plannedStart) : base.plannedStart,
+    plannedEnd: patch.plannedEnd ? new Date(patch.plannedEnd) : base.plannedEnd,
+    head: patch.head !== undefined ? patch.head : base.head,
+    tail: patch.tail !== undefined ? patch.tail : base.tail,
+    stops: base.stops,
+    note: patch.note !== undefined ? patch.note : base.note,
+  };
+  if (patch.stops || patch.doIds) {
+    const rebuilt = await toDraft(app.db, {
+      plannedStart: draft.plannedStart.toISOString(),
+      plannedEnd: draft.plannedEnd.toISOString(),
+      head: draft.head,
+      tail: draft.tail,
+      stops: patch.stops,
+      doIds: patch.doIds,
+      note: draft.note,
+    });
+    draft.stops = rebuilt.stops;
+  }
+  const mode = existing.status === 'DRAFT' ? 'draft' : 'planned';
+  const result = await validateShipment(app.db, draft, { shipmentId: existing._id, mode });
+  if (result.errors.length > 0) throw invalid(result.errors, result.warnings);
+
+  const stops = buildStopDocs(draft.stops, existing.stops);
+  const status: ShipmentStatus = existing.status === 'DRAFT' ? 'DRAFT' : 'PLANNED';
+  const next: ShipmentDoc = {
+    ...existing,
+    plannedStart: draft.plannedStart,
+    plannedEnd: draft.plannedEnd,
+    head: draft.head ? { vehicleId: oid(draft.head.vehicleId), driverId: draft.head.driverId ? oid(draft.head.driverId) : null } : null,
+    tail: draft.tail ? { vehicleId: oid(draft.tail.vehicleId), driverId: draft.tail.driverId ? oid(draft.tail.driverId) : null } : null,
+    stops,
+    legs: buildLegDocs(stops),
+    note: draft.note,
+    status,
+    dispatch: status === 'PLANNED' ? null : existing.dispatch,
+    driverResponse: status === 'PLANNED' ? null : existing.driverResponse,
+    version: existing.version + 1,
+    updatedBy: by,
+    updatedAt: new Date(),
+  };
+  return withTransaction(app.mongo, async (session) => {
+    const coll = app.db.collection<ShipmentDoc>(C.shipments);
+    const { _id, ...rest } = next;
+    const res = await coll.updateOne({ _id, version: existing.version }, { $set: rest }, { session });
+    if (res.matchedCount === 0) throw versionConflict();
+    await reserveResources(app.db, next, session);
+    await linkDos(app.db, next, doIdsOf(existing.stops), session);
+    next.warnings = [...withoutJobGroupWarnings(result.warnings), ...(await refreshJobGroups(app.db, next, result.headVehicle, session))];
+    await coll.updateOne({ _id }, { $set: { warnings: next.warnings } }, { session });
+    await writeAudit(app.db, { entity: 'shipment', entityId: _id.toHexString(), action: 'update', by, before: toApi(existing), after: toApi(next) }, { session });
+    return next;
+  });
+}
+
+export async function transition(
+  app: FastifyInstance,
+  existing: ShipmentDoc,
+  opts: { version: number; from: ShipmentStatus[]; set: Partial<ShipmentDoc>; action: string; by: string; notAllowedCode: string; releaseDos?: boolean },
+): Promise<ShipmentDoc> {
+  if (!opts.from.includes(existing.status)) {
+    throw unprocessable(opts.notAllowedCode, `Cannot ${opts.action} a ${existing.status} shipment`);
+  }
+  if (opts.version !== existing.version) throw versionConflict();
+  return withTransaction(app.mongo, async (session) => {
+    const coll = app.db.collection<ShipmentDoc>(C.shipments);
+    const updated = await coll.findOneAndUpdate(
+      { _id: existing._id, version: existing.version, status: existing.status },
+      { $set: { ...opts.set, updatedBy: opts.by, updatedAt: new Date() }, $inc: { version: 1 } },
+      { returnDocument: 'after', session },
+    );
+    if (!updated) throw versionConflict();
+    if (opts.releaseDos) await releaseDos(app.db, existing._id, session);
+    await writeAudit(
+      app.db,
+      { entity: 'shipment', entityId: existing._id.toHexString(), action: opts.action, by: opts.by, before: { status: existing.status }, after: { status: updated.status } },
+      { session },
+    );
+    return updated;
+  });
 }

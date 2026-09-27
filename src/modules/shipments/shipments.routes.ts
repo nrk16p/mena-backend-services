@@ -12,7 +12,7 @@ import { toApi } from '../../lib/serialize.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import { DoItem } from '../orders/orders.schemas.js';
 import { ShipmentInput, ShipmentItem, ValidateBody, ValidateResponse } from './shipment.schemas.js';
-import { createShipment, doIdsOf, shipmentView } from './shipment.service.js';
+import { createShipment, doIdsOf, draftFromDoc, invalid, shipmentView, transition, updateShipment } from './shipment.service.js';
 import { SHIPMENT_STATUSES, type ShipmentDoc } from './shipment.types.js';
 import { toDraft, validateShipment } from './shipment.validation.js';
 
@@ -22,6 +22,12 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
   const read = app.requireRoles(...STAFF_ROLES);
   const write = app.requireRoles('admin', 'planner');
   const coll = () => app.db.collection<ShipmentDoc>(C.shipments);
+  const load = async (id: string) => {
+    const doc = await coll().findOne({ _id: new ObjectId(id) });
+    if (!doc) throw notFound('Shipment');
+    return doc;
+  };
+  const Version = z.object({ version: z.number().int().positive() });
 
   app.post('/shipments/validate', { schema: { tags: ['shipments'], body: ValidateBody, response: { 200: ValidateResponse } }, preHandler: write }, async (req) => {
     const { shipmentId, mode, ...input } = req.body;
@@ -84,10 +90,43 @@ export const shipmentRoutes: FastifyPluginAsyncZod = async (app) => {
     '/shipments/:id',
     { schema: { tags: ['shipments'], params: IdParams, response: { 200: ShipmentItem.extend({ deliveryOrders: z.array(DoItem) }) } }, preHandler: read },
     async (req) => {
-      const doc = await coll().findOne({ _id: new ObjectId(req.params.id) });
-      if (!doc) throw notFound('Shipment');
+      const doc = await load(req.params.id);
       const dos = await app.db.collection<DeliveryOrderDoc>(C.deliveryOrders).find({ _id: { $in: doIdsOf(doc.stops) } }).toArray();
       return { ...shipmentView(doc), deliveryOrders: dos.map(toApi) };
     },
+  );
+
+  app.patch(
+    '/shipments/:id',
+    { schema: { tags: ['shipments'], params: IdParams, body: ShipmentInput.partial().extend({ version: z.number().int().positive() }), response: { 200: ShipmentItem } }, preHandler: write },
+    async (req) => shipmentView(await updateShipment(app, await load(req.params.id), req.body, actorOf(req))),
+  );
+
+  app.post('/shipments/:id/plan', { schema: { tags: ['shipments'], params: IdParams, body: Version, response: { 200: ShipmentItem } }, preHandler: write }, async (req) => {
+    const existing = await load(req.params.id);
+    if (existing.status === 'DRAFT') {
+      const result = await validateShipment(app.db, draftFromDoc(existing), { shipmentId: existing._id, mode: 'planned' });
+      if (result.errors.length > 0) throw invalid(result.errors, result.warnings);
+    }
+    return shipmentView(
+      await transition(app, existing, { version: req.body.version, from: ['DRAFT'], set: { status: 'PLANNED' }, action: 'plan', by: actorOf(req), notAllowedCode: 'SHIPMENT_NOT_DRAFT' }),
+    );
+  });
+
+  app.post(
+    '/shipments/:id/cancel',
+    { schema: { tags: ['shipments'], params: IdParams, body: Version.extend({ reason: z.string().trim().min(3).max(500) }), response: { 200: ShipmentItem } }, preHandler: write },
+    async (req) =>
+      shipmentView(
+        await transition(app, await load(req.params.id), {
+          version: req.body.version,
+          from: ['DRAFT', 'PLANNED', 'DISPATCHED', 'ACCEPTED'],
+          set: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: req.body.reason },
+          action: 'cancel',
+          by: actorOf(req),
+          notAllowedCode: 'SHIPMENT_NOT_CANCELLABLE',
+          releaseDos: true,
+        }),
+      ),
   );
 };
