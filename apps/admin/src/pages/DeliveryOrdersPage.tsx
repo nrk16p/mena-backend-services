@@ -13,6 +13,13 @@ import CreateDoDialog from './CreateDoDialog';
 
 const STATUSES = ['UNASSIGNED', 'PLANNED', 'PICKED_UP', 'DELIVERED', 'POD_VERIFIED', 'FAILED', 'CANCELLED'];
 
+const JOB_GROUP_MATCH_TH: Record<DeliveryOrder['jobGroupMatch']['status'], string> = {
+  auto: 'อัตโนมัติ',
+  manual: 'กำหนดเอง',
+  ambiguous: 'ซ้ำซ้อน',
+  none: 'ไม่พบกลุ่มงาน',
+};
+
 /** Toggles an id in/out of a selection list. Pure, so it's unit-testable without mounting the page. */
 export function toggleSelected(selected: string[], id: string): string[] {
   return selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id];
@@ -83,7 +90,9 @@ export default function DeliveryOrdersPage() {
               <TableCell>
                 {locations.get(d.originLocationId)} → {locations.get(d.destLocationId)}
               </TableCell>
-              <TableCell className="text-xs">{d.jobGroupMatch.status === 'none' ? <span className="text-amber-700">ไม่พบกลุ่มงาน</span> : d.jobGroupMatch.status}</TableCell>
+              <TableCell className="text-xs">
+                {d.jobGroupMatch.status === 'none' ? <span className="text-amber-700">{JOB_GROUP_MATCH_TH.none}</span> : JOB_GROUP_MATCH_TH[d.jobGroupMatch.status]}
+              </TableCell>
               <TableCell>
                 <StatusBadge status={d.status} />
               </TableCell>

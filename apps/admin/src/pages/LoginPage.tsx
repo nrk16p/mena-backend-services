@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { ApiError, login } from '@shared/api';
+import { login } from '@shared/api';
+import { describeError } from '@shared/errors';
 
 export default function LoginPage() {
   const nav = useNavigate();
@@ -19,7 +20,7 @@ export default function LoginPage() {
       await login(username, password);
       nav('/shipments');
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'เข้าสู่ระบบไม่สำเร็จ');
+      toast.error(describeError(err, 'เข้าสู่ระบบไม่สำเร็จ'));
     } finally {
       setBusy(false);
     }

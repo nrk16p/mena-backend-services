@@ -7,7 +7,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { ApiError, apiFetch } from '@shared/api';
+import { apiFetch } from '@shared/api';
+import { describeError } from '@shared/errors';
 import { fromBkkInput } from '@shared/time';
 import type { DeliveryOrder, Driver, Shipment, Vehicle } from '@shared/types';
 import IssueList from '../components/IssueList';
@@ -52,7 +53,7 @@ export default function ShipmentNewPage() {
       toast.success(`สร้าง ${sh.shipmentNo} แล้ว`);
       nav(`/shipments/${sh.id}`);
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : 'บันทึกไม่สำเร็จ'),
+    onError: (e) => toast.error(describeError(e, 'บันทึกไม่สำเร็จ')),
   });
   const draftErrors = (result?.errors ?? []).filter(
     (e) => !['TAIL_REQUIRED', 'HEAD_REQUIRED', 'HEAD_DRIVER_REQUIRED', 'TAIL_DRIVER_REQUIRED', 'STOPS_REQUIRED', 'DOS_REQUIRED'].includes(e.code),

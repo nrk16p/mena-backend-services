@@ -6,7 +6,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogT
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { ApiError, apiFetch } from '@shared/api';
+import { apiFetch } from '@shared/api';
+import { describeError } from '@shared/errors';
 import type { DeliveryOrder, LocationItem, MasterItem } from '@shared/types';
 import { useMaster } from '../lib/master';
 
@@ -81,7 +82,7 @@ export default function CreateDoDialog() {
       setForm(emptyCreateDoForm);
       setOpen(false);
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : 'สร้าง DO ไม่สำเร็จ'),
+    onError: (e) => toast.error(describeError(e, 'สร้าง DO ไม่สำเร็จ')),
   });
   const ready = isCreateDoFormReady(form);
   return (
