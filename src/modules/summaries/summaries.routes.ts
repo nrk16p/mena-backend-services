@@ -83,6 +83,8 @@ export const summaryRoutes: FastifyPluginAsyncZod = async (app) => {
       const s = await app.db.collection<TripSummaryDoc>(C.tripSummaries).findOne({ shipmentId: new ObjectId(req.params.id) });
       if (!s) throw notFound('Trip summary');
       if (!s.pdfKey) throw unprocessable('PDF_NOT_READY', 'The PDF is not generated yet');
+      // Buffers the whole PDF into memory before sending (accepted for now: evidence PDFs are small,
+      // a handful of downscaled photos per DO); revisit with a streamed storage read if that changes.
       const obj = await app.storage.get(s.pdfKey);
       if (!obj) throw unprocessable('PDF_NOT_READY', 'The PDF file is missing; regenerate it');
       return reply.header('content-type', 'application/pdf').header('content-disposition', `inline; filename="${s.shipmentNo}.pdf"`).send(obj.body);

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { App } from '../../src/app.js';
-import { type SummaryPdfData, buildSummaryPdf, embeddableImage } from '../../src/modules/summaries/pdf.js';
+import { C } from '../../src/db/collections.js';
+import { type SummaryPdfData, buildSummaryContent, buildSummaryPdf, embeddableImage } from '../../src/modules/summaries/pdf.js';
 import type { MemoryStorage } from '../../src/modules/storage/storage.js';
 import { buildTestApp, closeTestApp } from '../helpers/app.js';
 import { acceptedShipment, at, deliveredPod, gps, tap, tinyJpeg } from '../helpers/execution.js';
@@ -14,9 +15,10 @@ const base: SummaryPdfData = {
   shipmentNo: 'SH-2610-00001', plannedStart: new Date(), closedAt: new Date(), closedBy: 'admin',
   vehicles: ['80-3001'], drivers: ['สมชาย ใจดี'],
   stops: [{ seq: 1, location: 'โรงงานสระบุรี', events: [{ code: 'ARRIVED', at: new Date() }] }],
+  distances: [],
   dos: [{
     doNo: 'DO-2610-00001', client: 'SCG', material: 'ปูนผง', qty: 30, unit: 'ton', outcome: 'DELIVERED', reasonCode: null,
-    answers: [{ label: 'ชื่อผู้รับ', value: 'คุณสมศรี' }], hash: 'a'.repeat(64), images: [],
+    answers: [{ label: 'ชื่อผู้รับ', value: 'คุณสมศรี' }], hash: 'a'.repeat(64), images: [], clientKm: null,
   }],
   flags: [],
 };
@@ -48,6 +50,35 @@ describe('evidence PDF', () => {
     expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
   });
 
+  it('prints route distances, "ไม่มีข้อมูล" for missing legs, and client km per DO', () => {
+    const withNullLeg = buildSummaryContent({
+      ...base,
+      distances: [{ fromStop: 'โรงงานสระบุรี', toStop: 'คลังกรุงเทพ', loaded: true, mapKm: null, gpsKm: null }],
+    });
+    const nullLegText = JSON.stringify(withNullLeg);
+    expect(nullLegText).toContain('ไม่มีข้อมูล');
+    expect(nullLegText).toContain('โรงงานสระบุรี → คลังกรุงเทพ');
+    expect(nullLegText).toContain('มีสินค้า');
+
+    const withData = buildSummaryContent({
+      ...base,
+      distances: [
+        { fromStop: 'โรงงานสระบุรี', toStop: 'คลังกรุงเทพ', loaded: true, mapKm: 82.4, gpsKm: 85.36 },
+        { fromStop: 'คลังกรุงเทพ', toStop: 'โรงงานสระบุรี', loaded: false, mapKm: null, gpsKm: 84.0 },
+      ],
+      dos: [{ ...base.dos[0]!, clientKm: 80 }],
+    });
+    const dataText = JSON.stringify(withData);
+    expect(dataText).toContain('82.4 กม.');
+    expect(dataText).toContain('85.4 กม.'); // 85.36 rounds to 1 decimal
+    expect(dataText).toContain('รถเปล่า');
+    expect(dataText).toContain('80.0 กม.'); // client km
+    expect(dataText).toContain('ไม่มีข้อมูล'); // second leg's null mapKm
+
+    const noLegs = buildSummaryContent(base);
+    expect(JSON.stringify(noLegs)).toContain('ไม่มีข้อมูล');
+  });
+
   it('stores the PDF on close, serves it and lets a planner regenerate it', async () => {
     const { shipment, dos } = await acceptedShipment(app, f);
     for (const code of ['ARRIVED', 'LOAD_START', 'LOAD_END', 'DEPARTED']) await tap(app, f, shipment, 0, code);
@@ -62,9 +93,13 @@ describe('evidence PDF', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('application/pdf');
     expect(res.rawPayload.subarray(0, 4).toString()).toBe('%PDF');
+    // The close that just ran already generated the PDF once: exactly one audit entry so far.
+    expect(await app.db.collection(C.auditLog).countDocuments({ entity: 'tripSummary', entityId: summary.id, action: 'pdf' })).toBe(1);
     const regenerate = (h: { authorization: string }) => app.inject({ method: 'POST', url: `/api/v1/shipments/${shipment.id}/summary.pdf/regenerate`, headers: h });
     expect((await regenerate(f.viewer)).statusCode).toBe(403);
     expect(ok(await regenerate(f.planner)).pdfKey).toBe(`summaries/${shipment.shipmentNo}.pdf`);
+    // Regenerate is a second, independent generation: exactly one more audit entry, atomically with the pdfKey write.
+    expect(await app.db.collection(C.auditLog).countDocuments({ entity: 'tripSummary', entityId: summary.id, action: 'pdf' })).toBe(2);
   });
 
   it('still closes and produces a PDF when a POD file goes missing or is swapped after upload', async () => {

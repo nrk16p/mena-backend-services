@@ -32,9 +32,13 @@ export interface SummaryPdfData {
   vehicles: string[];
   drivers: string[];
   stops: { seq: number; location: string; events: { code: string; at: Date }[] }[];
+  /** One row per shipment leg (spec §5.1 evidence.distances.legs), in stop order. */
+  distances: { fromStop: string; toStop: string; loaded: boolean; mapKm: number | null; gpsKm: number | null }[];
   dos: {
     doNo: string; client: string; material: string; qty: number; unit: string; outcome: string; reasonCode: string | null;
     answers: { label: string; value: string }[]; hash: string; images: Buffer[];
+    /** Client-reported km for this DO, when the client supplied one; null prints nothing (not "ไม่มีข้อมูล"). */
+    clientKm: number | null;
   }[];
   flags: string[];
 }
@@ -63,7 +67,15 @@ export function embeddableImage(buf: Buffer): string | null {
 
 const bkk = (d: Date) => d.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' });
 
-export function buildSummaryPdf(data: SummaryPdfData): Promise<Buffer> {
+/** `82.4 กม.`, or `ไม่มีข้อมูล` when the distance was never captured (no GPS fix, map lookup failed, …). */
+const km = (v: number | null): string => (v === null ? 'ไม่มีข้อมูล' : `${v.toFixed(1)} กม.`);
+
+/**
+ * Builds the pdfmake `content` tree straight from the data, with no PDF rendering. Exported so
+ * tests can assert on the exact rows (e.g. a null leg prints "ไม่มีข้อมูล") without parsing a
+ * rendered PDF's bytes; `buildSummaryPdf` below is the only thing that actually rasterizes it.
+ */
+export function buildSummaryContent(data: SummaryPdfData): Content[] {
   const content: Content[] = [
     { text: `ใบสรุปเที่ยว ${data.shipmentNo}`, style: 'h1' },
     { text: `วันที่วางแผน ${bkk(data.plannedStart)} · ปิดงาน ${bkk(data.closedAt)} โดย ${data.closedBy}` },
@@ -79,6 +91,24 @@ export function buildSummaryPdf(data: SummaryPdfData): Promise<Buffer> {
       },
       margin: [0, 0, 0, 10],
     },
+    { text: 'ระยะทาง', style: 'h2' },
+    data.distances.length > 0
+      ? {
+          table: {
+            widths: ['*', 'auto', 'auto', 'auto'],
+            body: [
+              ['จาก → ถึง', 'สถานะ', 'ระยะแผนที่', 'ระยะ GPS'],
+              ...data.distances.map((leg) => [
+                `${leg.fromStop} → ${leg.toStop}`,
+                leg.loaded ? 'มีสินค้า' : 'รถเปล่า',
+                km(leg.mapKm),
+                km(leg.gpsKm),
+              ]),
+            ],
+          },
+          margin: [0, 0, 0, 10],
+        }
+      : { text: 'ไม่มีข้อมูล', margin: [0, 0, 0, 10] },
     { text: 'หลักฐานการส่งสินค้า (POD)', style: 'h2' },
   ];
   for (const d of data.dos) {
@@ -87,6 +117,7 @@ export function buildSummaryPdf(data: SummaryPdfData): Promise<Buffer> {
     const stack: Content[] = [
       { text: `${d.doNo} · ${d.client} · ${d.material} ${d.qty} ${d.unit}`, bold: true },
       { text: d.outcome === 'DELIVERED' ? 'ส่งสำเร็จ' : `ส่งไม่สำเร็จ · เหตุผล ${d.reasonCode ?? '-'}` },
+      ...(d.clientKm !== null ? [{ text: `ระยะทางที่ลูกค้าระบุ: ${km(d.clientKm)}` } satisfies Content] : []),
       ...d.answers.map((a): Content => ({ text: `${a.label}: ${a.value}` })),
       { text: `ลายนิ้วมือ POD: ${d.hash}`, fontSize: 7, color: '#555555' },
     ];
@@ -95,8 +126,12 @@ export function buildSummaryPdf(data: SummaryPdfData): Promise<Buffer> {
     content.push({ stack, margin: [0, 0, 0, 10] });
   }
   if (data.flags.length > 0) content.push({ text: `ข้อสังเกต: ${data.flags.join(', ')}`, color: '#b45309' });
+  return content;
+}
+
+export function buildSummaryPdf(data: SummaryPdfData): Promise<Buffer> {
   const doc: TDocumentDefinitions = {
-    content,
+    content: buildSummaryContent(data),
     defaultStyle: { font: 'Sarabun', fontSize: 10 },
     styles: { h1: { fontSize: 16, bold: true, margin: [0, 0, 0, 4] }, h2: { fontSize: 12, bold: true, margin: [0, 6, 0, 4] } },
     pageMargins: [36, 36, 36, 36],

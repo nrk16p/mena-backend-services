@@ -5,6 +5,7 @@ import { C } from '../../db/collections.js';
 import { writeAudit } from '../../lib/audit.js';
 import { notFound, unprocessable } from '../../lib/errors.js';
 import { mapLimit } from '../../lib/pool.js';
+import { withTransaction } from '../../lib/tx.js';
 import type { EventDoc } from '../execution/events.service.js';
 import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import type { PodField } from '../pod-templates/pod-templates.schemas.js';
@@ -217,6 +218,11 @@ export async function generateSummaryPdf(app: FastifyInstance, summaryId: Object
   const name = <T extends { _id: ObjectId }>(list: T[], id: ObjectId, field: keyof T) => String(list.find((x) => x._id.equals(id))?.[field] ?? '');
   const fieldsOf = (p: PodDoc | undefined): PodField[] =>
     (p?.templateId ? templates.find((t) => t._id.equals(p.templateId!))?.fields : undefined) ?? DEFAULT_POD_FIELDS;
+  const stopName = (stopId: ObjectId): string => {
+    const stop = shipment.stops.find((s) => s.stopId.equals(stopId));
+    return stop ? name(locations, stop.locationId, 'name') : '';
+  };
+  const clientKmByDo = new Map(summary.evidence.distances.clientKmByDo.map((c) => [c.doNo, c.clientKm]));
 
   // Every photo/signature file this PDF might embed, across every DO, re-hashed at
   // FILE_IO_CONCURRENCY total (not per DO) so a shipment with many DOs never fans out storage
@@ -245,6 +251,13 @@ export async function generateSummaryPdf(app: FastifyInstance, summaryId: Object
       location: name(locations, s.locationId, 'name'),
       events: events.filter((e) => e.stopId?.equals(s.stopId)).map((e) => ({ code: e.code, at: e.deviceTime })),
     })),
+    distances: summary.evidence.distances.legs.map((l) => ({
+      fromStop: stopName(l.fromStopId),
+      toStop: stopName(l.toStopId),
+      loaded: l.loaded,
+      mapKm: l.mapKm,
+      gpsKm: l.gpsKm,
+    })),
     dos: perDo.map(({ ep, p, fields, files }) => {
       const d = dos.find((x) => x._id.equals(ep.doId))!;
       const images: Buffer[] = [];
@@ -259,14 +272,20 @@ export async function generateSummaryPdf(app: FastifyInstance, summaryId: Object
         outcome: ep.outcome, reasonCode: ep.reasonCode,
         answers: [...(p ? answerLines(fields, p.answers) : []), ...markers],
         hash: ep.hash, images,
+        clientKm: clientKmByDo.get(ep.doNo) ?? null,
       };
     }),
     flags: summary.evidence.flags,
   });
   const key = `summaries/${shipment.shipmentNo}.pdf`;
   await app.storage.put(key, pdf, 'application/pdf');
-  await app.db.collection<TripSummaryDoc>(C.tripSummaries).updateOne({ _id: summaryId }, { $set: { pdfKey: key } });
-  // Writing/overwriting pdfKey is a staff mutation (whether triggered by close or by regenerate): one audit entry per generation.
-  await writeAudit(app.db, { entity: 'tripSummary', entityId: summaryId.toHexString(), action: 'pdf', by, after: { pdfKey: key } });
+  // The pdfKey write and its audit entry are one staff mutation: either both land or neither does,
+  // so a crash between them can never leave a pdfKey with no audit trail (or vice versa). `writeAudit`
+  // doesn't use `session` yet — it's passed now so this call needs no change once the audit-hardening
+  // branch (which does use it) merges.
+  await withTransaction(app.mongo, async (session) => {
+    await app.db.collection<TripSummaryDoc>(C.tripSummaries).updateOne({ _id: summaryId }, { $set: { pdfKey: key } }, { session });
+    await writeAudit(app.db, { entity: 'tripSummary', entityId: summaryId.toHexString(), action: 'pdf', by, after: { pdfKey: key } }, { session });
+  });
   return key;
 }
