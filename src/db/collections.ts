@@ -14,6 +14,8 @@ export const C = {
   vehicles: 'vehicles',
   drivers: 'drivers',
   palletMovementTypes: 'palletMovementTypes',
+  palletMovements: 'palletMovements',
+  palletBalances: 'palletBalances',
   podTemplates: 'podTemplates',
   statusCodes: 'statusCodes',
   holidays: 'holidays',
