@@ -263,7 +263,7 @@ A POD is submitted per DO at its drop stop (also for a failed attempt, with reas
 
 ### 6.3 Tamper evidence
 
-`pod.hash = SHA-256(canonical JSON of { doId, templateId, templateVersion, answers, files[].sha256, evidence })`. The evidence PDF prints POD hashes. A POD is immutable after submission; a resubmission is a new POD with `supersedesPodId`.
+`pod.hash = SHA-256(canonical JSON of { doId, templateId, templateVersion, outcome, reasonCode, note, answers, files, evidence })`, where `files` is the list of `{ key, sha256, fieldKey }` sorted by `key`, and `evidence` is exactly `{ deviceTime, receivedAt, lat, lng, accuracyM, noGpsReason, geofenceDistanceM, device, appVersion, offline }`. Ids are lowercase hex strings (`templateId` null for the default form), dates are ISO-8601 UTC strings, absent values are `null`, and canonical JSON sorts object keys recursively. The hash covers what was declared (outcome, reason, note, which field each file answers), not only the answers, so none of it can be changed without breaking the hash (ruling P3-R16). The evidence PDF prints POD hashes. A POD is immutable after submission; a resubmission is a new POD with `supersedesPodId`.
 
 ### 6.4 Review
 

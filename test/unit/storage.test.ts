@@ -1,8 +1,11 @@
 import { createHash, createHmac } from 'node:crypto';
+import { type Server, createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { Readable } from 'node:stream';
 import { ObjectId } from 'mongodb';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { canonicalJson, sha256Hex } from '../../src/lib/canonical.js';
-import { MemoryStorage, S3Storage, deriveLocalUploadKey, signLocal, verifyLocalSignature } from '../../src/modules/storage/storage.js';
+import { MemoryStorage, S3Storage, deriveLocalUploadKey, sha256OfStream, signLocal, verifyLocalSignature } from '../../src/modules/storage/storage.js';
 
 describe('canonical hashing', () => {
   it('sorts keys recursively so equal objects hash equally', () => {
@@ -84,7 +87,102 @@ describe('MemoryStorage', () => {
   });
 });
 
+describe('MemoryStorage head and streaming', () => {
+  it('reports the size without the body and streams the stored bytes', async () => {
+    const s = new MemoryStorage();
+    expect(await s.head('k')).toBeNull();
+    expect(await s.getStream('k')).toBeNull();
+    const body = Buffer.alloc(200_000, 7);
+    await s.put('k', body, 'image/jpeg');
+    expect(await s.head('k')).toEqual({ bytes: 200_000 });
+    const stream = (await s.getStream('k'))!;
+    expect(await sha256OfStream(stream, 1_000_000)).toEqual({ sha256: sha256Hex(body), bytes: 200_000 });
+  });
+});
+
+describe('sha256OfStream', () => {
+  it('hashes a multi-chunk stream', async () => {
+    const parts = [Buffer.from('ab'), Buffer.from('c')];
+    expect(await sha256OfStream(Readable.from(parts), 3)).toEqual({ sha256: sha256Hex('abc'), bytes: 3 });
+  });
+
+  it('stops reading and destroys the stream once more than maxBytes flow', async () => {
+    let pulled = 0;
+    const stream = new Readable({
+      read() {
+        pulled++;
+        this.push(Buffer.alloc(1000, 1)); // endless
+      },
+    });
+    expect(await sha256OfStream(stream, 4_500)).toBeNull();
+    expect(stream.destroyed).toBe(true);
+    expect(pulled).toBeLessThan(20);
+  });
+});
+
 describe('S3Storage', () => {
+  // A tiny path-style S3 stand-in: HEAD/GET on /bucket/key, 404 for anything else.
+  const objects = new Map<string, Buffer>([['pods/a/b/c.jpg', Buffer.alloc(70_000, 3)]]);
+  let server: Server;
+  let hanging: Server;
+  let endpoint: string;
+  let hangingEndpoint: string;
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      const key = decodeURIComponent((req.url ?? '').split('?')[0]!.replace(/^\/mena-pod\//, ''));
+      if (key === 'pods/a/b/stall.jpg') {
+        res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': '1000' });
+        return res.write(Buffer.alloc(10)); // then silence
+      }
+      const body = objects.get(key);
+      if (!body) {
+        res.writeHead(404, { 'content-type': 'application/xml' });
+        return res.end(req.method === 'HEAD' ? undefined : '<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>missing</Message></Error>');
+      }
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': String(body.length) });
+      res.end(req.method === 'HEAD' ? undefined : body);
+    });
+    hanging = createServer(() => {}); // accepts and never answers
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    await new Promise<void>((r) => hanging.listen(0, '127.0.0.1', r));
+    endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    hangingEndpoint = `http://127.0.0.1:${(hanging.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    hanging.closeAllConnections();
+    server.closeAllConnections();
+    await new Promise((r) => hanging.close(r));
+    await new Promise((r) => server.close(r));
+  });
+  const s3 = (url: string, extra: object = {}) =>
+    new S3Storage({ endpoint: url, region: 'us-east-1', bucket: 'mena-pod', key: 'AKIA', secret: 'secret', forcePathStyle: true, ...extra });
+
+  it('HEADs the size and streams the body; missing objects are null', async () => {
+    const s = s3(endpoint);
+    expect(await s.head('pods/a/b/c.jpg')).toEqual({ bytes: 70_000 });
+    expect(await s.head('pods/a/b/none.jpg')).toBeNull();
+    expect(await s.getStream('pods/a/b/none.jpg')).toBeNull();
+    const stream = (await s.getStream('pods/a/b/c.jpg'))!;
+    expect(await sha256OfStream(stream, 100_000)).toEqual({ sha256: sha256Hex(objects.get('pods/a/b/c.jpg')!), bytes: 70_000 });
+    const capped = (await s.getStream('pods/a/b/c.jpg'))!;
+    expect(await sha256OfStream(capped, 10_000)).toBeNull();
+  });
+
+  it('gives up on a server that never answers instead of hanging', async () => {
+    const s = s3(hangingEndpoint, { requestTimeoutMs: 150, connectionTimeoutMs: 150, maxAttempts: 1 });
+    const started = Date.now();
+    await expect(s.head('pods/a/b/c.jpg')).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('gives up on a body that stalls part-way through the download', async () => {
+    const s = s3(endpoint, { requestTimeoutMs: 150, maxAttempts: 1 });
+    const stream = (await s.getStream('pods/a/b/stall.jpg'))!;
+    const started = Date.now();
+    await expect(sha256OfStream(stream, 5_000)).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   it('presigns PUT and GET URLs for the bucket without network access', async () => {
     const s = new S3Storage({ endpoint: 'https://sgp1.digitaloceanspaces.com', region: 'sgp1', bucket: 'mena-pod', key: 'AKIA', secret: 'secret' });
     const put = await s.presignPut('pods/a/b/c.jpg', 'image/jpeg', 300);
