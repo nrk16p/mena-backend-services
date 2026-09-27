@@ -1,8 +1,10 @@
+import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { App } from '../../src/app.js';
 import { C } from '../../src/db/collections.js';
 import { type SummaryPdfData, buildSummaryContent, buildSummaryPdf, embeddableImage } from '../../src/modules/summaries/pdf.js';
 import type { MemoryStorage } from '../../src/modules/storage/storage.js';
+import { summaryPdfData } from '../../src/modules/summaries/close.service.js';
 import { buildTestApp, closeTestApp } from '../helpers/app.js';
 import { acceptedShipment, at, deliveredPod, gps, tap, tinyJpeg } from '../helpers/execution.js';
 import { ok } from '../helpers/http.js';
@@ -121,5 +123,33 @@ describe('evidence PDF', () => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/shipments/${shipment.id}/summary.pdf`, headers: f.viewer });
     expect(res.statusCode).toBe(200);
     expect(res.rawPayload.subarray(0, 4).toString()).toBe('%PDF');
+  });
+  it('marks a POD whose stored data no longer matches the hash locked at close, without failing the PDF', async () => {
+    const { shipment, dos } = await acceptedShipment(app, f, { day: '2026-10-26' });
+    for (const code of ['ARRIVED', 'LOAD_START', 'LOAD_END', 'DEPARTED']) await tap(app, f, shipment, 0, code);
+    for (const code of ['ARRIVED', 'UNLOAD_START', 'UNLOAD_END']) await tap(app, f, shipment, 1, code, gps(13.75, 100.5, at('10:00', '2026-10-26')));
+    const pod = ok(await deliveredPod(app, f, shipment, dos[0]), 201);
+    ok(await app.inject({ method: 'POST', url: `/api/v1/pods/${pod.id}/verify`, headers: f.admin }));
+    const current = ok(await app.inject({ method: 'GET', url: `/api/v1/shipments/${shipment.id}`, headers: f.admin }));
+    ok(await app.inject({ method: 'POST', url: `/api/v1/shipments/${shipment.id}/close`, headers: f.admin, payload: { version: current.version } }));
+    const summary = ok(await app.inject({ method: 'GET', url: `/api/v1/shipments/${shipment.id}/summary`, headers: f.viewer }));
+    const HASH_MARKER = 'ข้อมูล POD ถูกแก้ไขหลังปิดงาน (hash ไม่ตรง)';
+    const FILES_MARKER = 'รายการไฟล์ POD ถูกแก้ไขหลังปิดงาน';
+
+    const clean = JSON.stringify(buildSummaryContent(await summaryPdfData(app, new ObjectId(summary.id))));
+    expect(clean).not.toContain(HASH_MARKER);
+    expect(clean).not.toContain(FILES_MARKER);
+
+    await app.db.collection(C.pods).updateOne({ _id: new ObjectId(pod.id) }, { $set: { 'answers.receiverName': 'คนอื่น' } });
+    const tampered = JSON.stringify(buildSummaryContent(await summaryPdfData(app, new ObjectId(summary.id))));
+    expect(tampered).toContain(HASH_MARKER);
+    expect(tampered).not.toContain(FILES_MARKER);
+
+    await app.db.collection(C.pods).updateOne({ _id: new ObjectId(pod.id) }, { $set: { 'files.0.fieldKey': 'otherField' } });
+    expect(JSON.stringify(buildSummaryContent(await summaryPdfData(app, new ObjectId(summary.id))))).toContain(FILES_MARKER);
+    // Regenerating still succeeds and stores the PDF.
+    expect(ok(await app.inject({ method: 'POST', url: `/api/v1/shipments/${shipment.id}/summary.pdf/regenerate`, headers: f.planner })).pdfKey).toBe(
+      `summaries/${shipment.shipmentNo}.pdf`,
+    );
   });
 });

@@ -11,10 +11,10 @@ import type { DeliveryOrderDoc } from '../orders/order.types.js';
 import type { PodField } from '../pod-templates/pod-templates.schemas.js';
 import type { PodTemplateDoc } from '../pod-templates/pod-templates.service.js';
 import { DEFAULT_POD_FIELDS } from '../pods/pod-validation.js';
-import type { PodDoc } from '../pods/pods.service.js';
+import { type PodDoc, podHashOf } from '../pods/pods.service.js';
 import { doIdsOf, releaseDos, transition } from '../shipments/shipment.service.js';
 import type { ShipmentDoc } from '../shipments/shipment.types.js';
-import { buildSummaryPdf } from './pdf.js';
+import { type SummaryPdfData, buildSummaryPdf } from './pdf.js';
 
 /** A POD file as it was when the trip was locked; Task 9 re-hashes the stored object and flags a mismatch. */
 export interface SummaryPodFile {
@@ -196,7 +196,54 @@ async function verifyStoredFile(app: FastifyInstance, file: SummaryPodFile, maxB
   return { ok: true, buf: Buffer.concat(chunks) };
 }
 
+const POD_MARKER_LABEL = 'คำเตือน';
+const POD_MARKERS = {
+  missing: 'ไม่พบข้อมูล POD ที่บันทึกไว้ตอนปิดงาน',
+  hash: 'ข้อมูล POD ถูกแก้ไขหลังปิดงาน (hash ไม่ตรง)',
+  files: 'รายการไฟล์ POD ถูกแก้ไขหลังปิดงาน (ไม่ตรงกับที่บันทึกไว้ตอนปิดงาน)',
+} as const;
+
+const fileFingerprint = (files: readonly SummaryPodFile[]): string =>
+  JSON.stringify(files.map((x) => [x.key, x.sha256, x.fieldKey]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)));
+
+/**
+ * Re-verifies a stored POD against what the trip summary locked in: `podHashOf` recomputed over
+ * the POD as it is now vs the snapshot hash, and its file list (key, sha256, fieldKey) vs the
+ * snapshot's. Never throws: a mismatch becomes a printed marker so the PDF is still produced.
+ */
+function podIntegrityMarkers(ep: TripSummaryDoc['evidence']['pods'][number], p: PodDoc | undefined): { label: string; value: string }[] {
+  if (!p) return [{ label: POD_MARKER_LABEL, value: POD_MARKERS.missing }];
+  const markers: { label: string; value: string }[] = [];
+  let hash: string | null = null;
+  try {
+    hash = podHashOf(p);
+  } catch {
+    // A POD document edited into a shape the hash can't even be computed over is itself a mismatch.
+  }
+  if (hash !== ep.hash) markers.push({ label: POD_MARKER_LABEL, value: POD_MARKERS.hash });
+  if (fileFingerprint(p.files ?? []) !== fileFingerprint(ep.files)) markers.push({ label: POD_MARKER_LABEL, value: POD_MARKERS.files });
+  return markers;
+}
+
 export async function generateSummaryPdf(app: FastifyInstance, summaryId: ObjectId, by: string): Promise<string> {
+  const data = await summaryPdfData(app, summaryId);
+  const pdf = await buildSummaryPdf(data);
+  const key = `summaries/${data.shipmentNo}.pdf`;
+  await app.storage.put(key, pdf, 'application/pdf');
+  // The pdfKey write and its audit entry are one staff mutation: either both land or neither does,
+  // so a crash between them can never leave a pdfKey with no audit trail (or vice versa).
+  await withTransaction(app.mongo, async (session) => {
+    await app.db.collection<TripSummaryDoc>(C.tripSummaries).updateOne({ _id: summaryId }, { $set: { pdfKey: key } }, { session });
+    await writeAudit(app.db, { entity: 'tripSummary', entityId: summaryId.toHexString(), action: 'pdf', by, after: { pdfKey: key } }, { session });
+  });
+  return key;
+}
+
+/**
+ * Everything the evidence PDF prints for a trip summary, read and re-verified (POD hashes and
+ * file lists, stored file bytes) but not rendered. Exported so tests can assert on the content.
+ */
+export async function summaryPdfData(app: FastifyInstance, summaryId: ObjectId): Promise<SummaryPdfData> {
   const summary = await app.db.collection<TripSummaryDoc>(C.tripSummaries).findOne({ _id: summaryId });
   if (!summary) throw notFound('Trip summary');
   const shipment = (await app.db.collection<ShipmentDoc>(C.shipments).findOne({ _id: summary.shipmentId }))!;
@@ -239,7 +286,7 @@ export async function generateSummaryPdf(app: FastifyInstance, summaryId: Object
   const checks = await mapLimit(allFiles, FILE_IO_CONCURRENCY, (file) => verifyStoredFile(app, file, app.config.UPLOAD_MAX_BYTES));
   const checkByKey = new Map(allFiles.map((file, i) => [file.key, checks[i]!]));
 
-  const pdf = await buildSummaryPdf({
+  return {
     shipmentNo: shipment.shipmentNo,
     plannedStart: shipment.plannedStart,
     closedAt: summary.lockedAt,
@@ -270,22 +317,11 @@ export async function generateSummaryPdf(app: FastifyInstance, summaryId: Object
       return {
         doNo: ep.doNo, client: name(clients, d.clientId, 'name'), material: name(materials, d.materialId, 'name'), qty: d.qty, unit: d.unit,
         outcome: ep.outcome, reasonCode: ep.reasonCode,
-        answers: [...(p ? answerLines(fields, p.answers) : []), ...markers],
+        answers: [...podIntegrityMarkers(ep, p), ...(p ? answerLines(fields, p.answers) : []), ...markers],
         hash: ep.hash, images,
         clientKm: clientKmByDo.get(ep.doNo) ?? null,
       };
     }),
     flags: summary.evidence.flags,
-  });
-  const key = `summaries/${shipment.shipmentNo}.pdf`;
-  await app.storage.put(key, pdf, 'application/pdf');
-  // The pdfKey write and its audit entry are one staff mutation: either both land or neither does,
-  // so a crash between them can never leave a pdfKey with no audit trail (or vice versa). `writeAudit`
-  // doesn't use `session` yet — it's passed now so this call needs no change once the audit-hardening
-  // branch (which does use it) merges.
-  await withTransaction(app.mongo, async (session) => {
-    await app.db.collection<TripSummaryDoc>(C.tripSummaries).updateOne({ _id: summaryId }, { $set: { pdfKey: key } }, { session });
-    await writeAudit(app.db, { entity: 'tripSummary', entityId: summaryId.toHexString(), action: 'pdf', by, after: { pdfKey: key } }, { session });
-  });
-  return key;
+  };
 }
